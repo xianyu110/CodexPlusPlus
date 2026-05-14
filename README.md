@@ -43,29 +43,7 @@ python -m codex_session_delete setup
 
 安装后会生成 `/Applications/Codex++.app`。
 
-## 交流与支持
 
-欢迎扫码加入 Codex++ 交流群，反馈问题、交流使用体验或提出新功能建议：
-
-<img src="docs/images/discussion-group-qr.jpg" alt="Codex++ 交流群二维码" width="260">
-
-如果 Codex++ 帮到了你，可以请我喝杯咖啡，或者随手赞赏支持一下继续维护。
-
-<p align="center">
-  <img src="docs/images/sponsor-alipay.jpg" alt="支付宝赞赏码" width="220">
-  <img src="docs/images/sponsor-wechat.jpg" alt="微信赞赏码" width="220">
-</p>
-
-## 赞助商
-
-<table>
-  <tr>
-    <th>🏆 赞助商 🏆</th>
-  </tr>
-  <tr>
-    <td>👉 <a href="https://rawchat.cn">RawChat｜Codex 中转站</a> 老牌中转站，支持包月套餐。低倍率调用，高缓存命中，Pro/Plus 号池，全天专人维护。</td>
-  </tr>
-</table>
 
 ## 功能亮点
 
