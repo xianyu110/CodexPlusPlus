@@ -193,6 +193,15 @@ codex_session_delete/
 tests/                   自动化测试
 ```
 
+
+
+## Codex国内使用
+
+https://codex.chatgpt-plus.top/login
+
+<img width="520" height="520" alt="image" src="https://github.com/user-attachments/assets/272ce57d-3750-482e-9e9e-026bac4a0743" />
+
+
 ## 友情链接
 
 - [LINUX DO](https://linux.do)
