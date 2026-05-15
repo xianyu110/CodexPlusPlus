@@ -67,8 +67,10 @@ def test_renderer_script_configures_recommendation_tab_without_coffee_tab():
 
     assert 'data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>' in text
     assert 'data-codex-plus-tab="support"' not in text
-    assert "赞助商推荐" in text
-    assert "普通推荐" in text
+    assert "Codex国内站" in text
+    assert "无需复杂环境，打开即可访问 Codex 国内入口" in text
+    assert "赞助商推荐" not in text
+    assert "普通推荐" not in text
     assert 'data-codex-plus-active-tab="sponsor"' not in text
     assert '.codex-plus-modal-content[data-codex-plus-active-tab="support"]' not in text
     assert "codex-plus-ad-image" not in text
@@ -81,8 +83,8 @@ def test_renderer_script_uses_recommendation_copy_for_ad_page():
     sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):]
 
     assert 'data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>' in text
-    assert "赞助商推荐" in sponsor_panel
-    assert "普通推荐" in sponsor_panel
+    assert "Codex国内站" in sponsor_panel
+    assert "无需复杂环境，打开即可访问 Codex 国内入口" in sponsor_panel
     assert "广告分为" not in sponsor_panel
 
 
@@ -133,10 +135,9 @@ def test_renderer_script_renders_sponsor_and_normal_ad_groups():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
     sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):]
 
-    assert "赞助商推荐" in sponsor_panel
-    assert "普通推荐" in sponsor_panel
-    assert "renderCodexPlusAdGroup(\"sponsor\"" in text
-    assert "renderCodexPlusAdGroup(\"normal\"" in text
+    assert "Codex国内站" in sponsor_panel
+    assert "renderCodexPlusAdCards(codexPlusAds" in text
+    assert "renderCodexPlusAdGroup" not in text
     assert "codex-plus-ad-empty" in text
     assert "codex-plus-ad-image" not in text
 

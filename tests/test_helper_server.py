@@ -3,7 +3,6 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib import resources
 
 from codex_session_delete.helper_server import HelperServer
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
@@ -54,7 +53,7 @@ def post_json(url, payload, headers=None):
         return json.loads(response.read().decode("utf-8"))
 
 
-def test_helper_server_serves_remote_ad_list_from_helper_origin():
+def test_helper_server_serves_default_codex_cn_ad_from_helper_origin():
     service = FakeDeleteService()
     server = HelperServer("127.0.0.1", 0, service)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -70,9 +69,16 @@ def test_helper_server_serves_remote_ad_list_from_helper_origin():
 
     assert content_type == "application/json"
     assert body["version"] == 1
-    assert {ad["type"] for ad in body["ads"]} == {"sponsor", "normal"}
-    assert any(ad["url"] == "https://rawchat.cn" for ad in body["ads"])
-    assert any(ad["url"] == "https://www.0029.org/?promo=AFF11F" for ad in body["ads"])
+    assert body["ads"] == [
+        {
+            "id": "codex-cn",
+            "type": "normal",
+            "title": "Codex国内站",
+            "description": "无需复杂环境，打开即可使用 Codex 国内入口。",
+            "url": "https://codex.chatgpt-plus.top/login",
+            "highlights": ["Codex 国内入口", "快速访问", "适合国内用户"],
+        }
+    ]
 
 
 
@@ -92,7 +98,7 @@ def test_helper_server_tries_backup_ad_list_url_when_primary_fails():
                             "type": "normal",
                             "title": "Backup",
                             "description": "Loaded from backup",
-                            "url": "https://0029.org",
+                            "url": "https://example.com",
                             "highlights": [],
                         }
                     ],
@@ -280,44 +286,46 @@ def test_helper_server_returns_thread_sort_keys():
     assert sort_keys == {"status": "ok", "sort_keys": [{"session_id": "s1", "updated_at_ms": 1}, {"session_id": "s2", "updated_at_ms": 2}]}
 
 
-def test_helper_server_serves_packaged_sponsor_assets():
+def test_helper_server_does_not_serve_removed_sponsor_assets():
     service = FakeDeleteService()
     server = HelperServer("127.0.0.1", 0, service)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with resources.files("codex_session_delete").joinpath("assets/sponsor-alipay.jpg").open("rb") as asset:
-            expected = asset.read()
         request = urllib.request.Request(f"http://127.0.0.1:{server.port}/assets/sponsor-alipay.jpg", method="GET")
-        with urllib.request.urlopen(request, timeout=3) as response:
-            body = response.read()
-            content_type = response.headers.get("Content-Type")
+        try:
+            urllib.request.urlopen(request, timeout=3)
+            assert False, "expected removed asset to return 404"
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8"))
+            status = exc.code
     finally:
         server.shutdown()
         thread.join(timeout=3)
 
-    assert body == expected
-    assert content_type == "image/jpeg"
+    assert status == 404
+    assert body == {"error": "not found", "asset": "sponsor-alipay.jpg"}
 
 
-def test_helper_server_serves_rawchat_sponsor_asset():
+def test_helper_server_does_not_serve_removed_rawchat_asset():
     service = FakeDeleteService()
     server = HelperServer("127.0.0.1", 0, service)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with resources.files("codex_session_delete").joinpath("assets/rawchat-sponsor.jpg").open("rb") as asset:
-            expected = asset.read()
         request = urllib.request.Request(f"http://127.0.0.1:{server.port}/assets/rawchat-sponsor.jpg", method="GET")
-        with urllib.request.urlopen(request, timeout=3) as response:
-            body = response.read()
-            content_type = response.headers.get("Content-Type")
+        try:
+            urllib.request.urlopen(request, timeout=3)
+            assert False, "expected removed asset to return 404"
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8"))
+            status = exc.code
     finally:
         server.shutdown()
         thread.join(timeout=3)
 
-    assert body == expected
-    assert content_type == "image/jpeg"
+    assert status == 404
+    assert body == {"error": "not found", "asset": "rawchat-sponsor.jpg"}
 
 
 def test_helper_server_allows_private_network_preflight():

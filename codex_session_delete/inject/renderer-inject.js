@@ -638,8 +638,7 @@
     }));
   }
 
-  function renderCodexPlusAdGroup(type, emptyText) {
-    const ads = codexPlusAds.filter((ad) => ad.type === type);
+  function renderCodexPlusAdCards(ads, emptyText) {
     if (!ads.length) return `<div class="codex-plus-ad-empty">${escapeHtml(emptyText)}</div>`;
     return ads.map((ad) => `
       <article class="codex-plus-ad-card">
@@ -660,12 +659,8 @@
     if (!codexPlusAds.length) return `<div class="codex-plus-ad-empty">暂无推荐内容。</div>`;
     return `
       <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">赞助商推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("sponsor", "暂无赞助商推荐。")}</div>
-      </section>
-      <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">普通推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("normal", "暂无普通推荐。")}</div>
+        <h3 class="codex-plus-ad-section-title">Codex国内站</h3>
+        <div class="codex-plus-ad-list">${renderCodexPlusAdCards(codexPlusAds, "暂无推荐内容。")}</div>
       </section>
     `;
   }
@@ -780,7 +775,7 @@
             </div>
           </div>
           <div class="codex-plus-panel" data-codex-plus-panel="sponsor" hidden>
-            <div class="codex-plus-sponsor-text">推荐内容分为赞助商推荐和普通推荐。赞助商推荐来自支持 Codex++ 继续维护的合作方；普通推荐用于展示适合 Codex 用户的服务与信息。</div>
+            <div class="codex-plus-sponsor-text">推荐使用 Codex国内站：无需复杂环境，打开即可访问 Codex 国内入口。</div>
             <div class="codex-plus-ad-remote">
               ${renderCodexPlusAds()}
             </div>

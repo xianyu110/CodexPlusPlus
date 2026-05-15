@@ -26,7 +26,7 @@ class FakeRuntime:
         self.injected = []
         self.devtools_opened = False
         self.repaired = False
-        self.ads_payload = {"version": 1, "ads": [{"id": "runtime-ad", "type": "normal", "title": "Runtime Ad", "description": "Loaded", "url": "https://0029.org", "highlights": []}]}
+        self.ads_payload = {"version": 1, "ads": [{"id": "runtime-ad", "type": "normal", "title": "Runtime Ad", "description": "Loaded", "url": "https://example.com", "highlights": []}]}
 
     def reload_user_scripts(self):
         bundle = self.user_scripts.build_enabled_bundle()
@@ -128,4 +128,3 @@ def test_handle_bridge_request_exports_markdown(tmp_path):
 
     assert exported["status"] == "exported"
     assert exported["filename"] == "thread.md"
-
