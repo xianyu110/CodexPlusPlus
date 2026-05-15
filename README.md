@@ -202,21 +202,6 @@ https://codex.chatgpt-plus.top/login
 <img width="520" height="520" alt="image" src="https://github.com/user-attachments/assets/272ce57d-3750-482e-9e9e-026bac4a0743" />
 
 
-## 友情链接
-
-- [LINUX DO](https://linux.do)
-
-## 贡献者与 Star
-
-<a href="https://github.com/BigPizzaV3/CodexPlusPlus/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=BigPizzaV3/CodexPlusPlus" alt="Codex++ contributors">
-</a>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=BigPizzaV3/CodexPlusPlus&type=Date&theme=dark">
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=BigPizzaV3/CodexPlusPlus&type=Date">
-  <img alt="Codex++ Star History" src="https://api.star-history.com/svg?repos=BigPizzaV3/CodexPlusPlus&type=Date">
-</picture>
 
 ## 说明
 
