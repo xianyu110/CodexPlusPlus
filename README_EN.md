@@ -56,16 +56,7 @@ If Codex++ has helped you, you can buy me a coffee or send a small tip to suppor
   <img src="docs/images/sponsor-wechat.jpg" alt="WeChat sponsor QR code" width="220">
 </p>
 
-## Sponsor
 
-<table>
-  <tr>
-    <th>🏆 Sponsor 🏆</th>
-  </tr>
-  <tr>
-    <td>👉 <a href="https://rawchat.cn">RawChat | Codex Relay</a> A long-running Codex relay provider with monthly plans, low-rate calls, high cache-hit performance, Pro/Plus account pools, and dedicated all-day maintenance.</td>
-  </tr>
-</table>
 
 ## Highlights
 
