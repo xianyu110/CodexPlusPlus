@@ -47,34 +47,30 @@ def test_renderer_script_positions_delete_button_without_affecting_layout():
 
 
 
-def test_renderer_script_keeps_sponsors_separate_from_author_support():
+def test_renderer_script_removes_author_support_from_modal():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
-    sponsor_start = text.index('<div class="codex-plus-panel" data-codex-plus-panel="sponsor"')
-    support_start = text.index('<div class="codex-plus-panel" data-codex-plus-panel="support"', sponsor_start)
-    sponsor_panel = text[sponsor_start:support_start]
-    support_panel = text[support_start:text.index('</div>\n        </div>\n      </div>', support_start)]
 
     assert 'data-codex-plus-tab="sponsor"' in text
-    assert 'data-codex-plus-tab="support"' in text
     assert "codexPlusAdsUrl" in text
-    assert "renderCodexPlusAds()" in sponsor_panel
-    assert "请我喝杯咖啡" not in sponsor_panel
-    assert "请作者喝咖啡" not in sponsor_panel
-    assert "codex-plus-sponsor-grid" not in sponsor_panel
-    assert "请我喝杯咖啡" in support_panel
-    assert "codex-plus-sponsor-grid" in support_panel
+    assert "renderCodexPlusAds()" in text
+    assert 'data-codex-plus-tab="support"' not in text
+    assert 'data-codex-plus-panel="support"' not in text
+    assert "请我喝杯咖啡" not in text
+    assert "请作者喝咖啡" not in text
+    assert "codex-plus-sponsor-grid" not in text
+    assert "codex-plus-sponsor-qr" not in text
 
 
 
-def test_renderer_script_configures_sponsor_ad_and_coffee_tabs():
+def test_renderer_script_configures_recommendation_tab_without_coffee_tab():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
 
     assert 'data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>' in text
-    assert 'data-codex-plus-tab="support" data-active="false">请作者喝咖啡</button>' in text
-    assert "赞助商推荐" in text[text.index('data-codex-plus-panel="sponsor"'):text.index('data-codex-plus-panel="support"')]
-    assert "普通推荐" in text[text.index('data-codex-plus-panel="sponsor"'):text.index('data-codex-plus-panel="support"')]
+    assert 'data-codex-plus-tab="support"' not in text
+    assert "赞助商推荐" in text
+    assert "普通推荐" in text
     assert 'data-codex-plus-active-tab="sponsor"' not in text
-    assert '.codex-plus-modal-content[data-codex-plus-active-tab="support"] { width: min(820px, calc(100vw - 48px)); }' in text
+    assert '.codex-plus-modal-content[data-codex-plus-active-tab="support"]' not in text
     assert "codex-plus-ad-image" not in text
     assert "rawchat-sponsor.jpg" not in text[text.index("function renderCodexPlusAds"):text.index("function selectCodexPlusTab")]
 
@@ -82,7 +78,7 @@ def test_renderer_script_configures_sponsor_ad_and_coffee_tabs():
 
 def test_renderer_script_uses_recommendation_copy_for_ad_page():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
-    sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):text.index('data-codex-plus-panel="support"')]
+    sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):]
 
     assert 'data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>' in text
     assert "赞助商推荐" in sponsor_panel
@@ -135,7 +131,7 @@ def test_renderer_script_loads_ads_from_remote_json_without_local_fallback():
 
 def test_renderer_script_renders_sponsor_and_normal_ad_groups():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
-    sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):text.index('data-codex-plus-panel="support"')]
+    sponsor_panel = text[text.index('data-codex-plus-panel="sponsor"'):]
 
     assert "赞助商推荐" in sponsor_panel
     assert "普通推荐" in sponsor_panel
@@ -566,7 +562,7 @@ def test_renderer_script_includes_user_script_manager_ui_contract():
     assert "codexPlusVersion = \"1.0.7\"" in text
     assert "Codex++ ${codexPlusVersion}" in text
     assert "提出问题" in text
-    assert "https://github.com/BigPizzaV3/CodexPlusPlus/issues" in text
+    assert "https://github.com/xianyu110/CodexPlusPlus/issues" in text
     assert "window.open(issueUrl, \"_blank\")" in text
     assert "插件选项解锁" in text
     assert "特殊插件强制安装" in text
@@ -575,7 +571,7 @@ def test_renderer_script_includes_user_script_manager_ui_contract():
     assert "原生菜单栏位置" in text
     assert "nativeMenuPlacement: true" in text
     assert "关于 Codex++" in text
-    assert "https://github.com/BigPizzaV3/CodexPlusPlus" in text
+    assert "https://github.com/xianyu110/CodexPlusPlus" in text
     assert "codexPlusSettings" in text
     assert "pluginEntryUnlock" in text
     assert "forcePluginInstall" in text
@@ -621,21 +617,22 @@ def test_renderer_script_has_sponsor_tab():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
 
     assert "data-codex-plus-tab=\"sponsor\"" in text
-    assert "data-codex-plus-tab=\"support\"" in text
     assert "推荐内容" in text
-    assert "请作者喝咖啡" in text
-    assert "请我喝杯咖啡" in text
     assert "data-codex-plus-panel=\"sponsor\"" in text
-    assert "data-codex-plus-panel=\"support\"" in text
-    assert "window.__CODEX_PLUS_SPONSOR_IMAGES__?.alipay" in text
-    assert "window.__CODEX_PLUS_SPONSOR_IMAGES__?.wechat" in text
-    assert "codex-plus-sponsor-grid" in text
-    assert "codex-plus-modal-content[data-codex-plus-active-tab=\"support\"]" in text
+    assert "data-codex-plus-tab=\"support\"" not in text
+    assert "data-codex-plus-panel=\"support\"" not in text
+    assert "请作者喝咖啡" not in text
+    assert "请我喝杯咖啡" not in text
+    assert "支付宝赞赏码" not in text
+    assert "微信赞赏码" not in text
+    assert "window.__CODEX_PLUS_SPONSOR_IMAGES__?.alipay" not in text
+    assert "window.__CODEX_PLUS_SPONSOR_IMAGES__?.wechat" not in text
+    assert "codex-plus-sponsor-grid" not in text
+    assert "codex-plus-modal-content[data-codex-plus-active-tab=\"support\"]" not in text
     assert "codex-plus-modal-content[data-codex-plus-active-tab=\"sponsor\"]" not in text
-    assert "width: min(820px, calc(100vw - 48px))" in text
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in text
-    assert "max-width: 340px" in text
-    assert "codex-plus-sponsor-qr" in text
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" not in text
+    assert "max-width: 340px" not in text
+    assert "codex-plus-sponsor-qr" not in text
 
 
 def test_renderer_script_has_backend_provider_sync_toggle():
