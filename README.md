@@ -199,7 +199,8 @@ tests/                   自动化测试
 
 https://codex.chatgpt-plus.top/login
 
-<img width="520" height="520" alt="image" src="https://github.com/user-attachments/assets/272ce57d-3750-482e-9e9e-026bac4a0743" />
+https://codex2.chatgpt-plus.top/login
+<img width="260" height="260" alt="image" src="https://github.com/user-attachments/assets/cf6ecb47-9a32-4410-adc0-f3b489e4c6d6" />
 
 
 
