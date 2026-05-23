@@ -33,7 +33,7 @@
   const codexArchiveRowActionsVersion = "1";
   const codexArchiveDeleteAllVersion = "2";
   const codexConversationTimelineVersion = "2";
-  const codexPlusVersion = "1.0.7";
+  const codexPlusVersion = "1.0.8";
   const codexPlusSettingsKey = "codexPlusSettings";
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;

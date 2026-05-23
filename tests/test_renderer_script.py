@@ -560,7 +560,7 @@ def test_renderer_script_includes_user_script_manager_ui_contract():
     assert "setAuthMethod(\"chatgpt\")" in text
     assert "patchFastModeGateOnObject" not in text
     assert "Codex++" in text
-    assert "codexPlusVersion = \"1.0.7\"" in text
+    assert "codexPlusVersion = \"1.0.8\"" in text
     assert "Codex++ ${codexPlusVersion}" in text
     assert "提出问题" in text
     assert "https://github.com/xianyu110/CodexPlusPlus/issues" in text
