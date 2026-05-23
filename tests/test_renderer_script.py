@@ -649,6 +649,26 @@ def test_renderer_script_has_backend_provider_sync_toggle():
     assert "setBackendSetting" in text
 
 
+def test_renderer_script_has_relay_configuration_panel():
+    text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
+
+    assert "中转配置" in text
+    assert "data-codex-plus-tab=\"relay\"" in text
+    assert "data-codex-plus-panel=\"relay\"" in text
+    assert "data-codex-relay-base-url" in text
+    assert "data-codex-relay-api-key" in text
+    assert "data-codex-relay-apply" in text
+    assert "data-codex-relay-clear" in text
+    assert "data-codex-relay-refresh" in text
+    assert "/relay/status" in text
+    assert "/relay/apply" in text
+    assert "/relay/clear" in text
+    assert "function loadRelayStatus" in text
+    assert "function applyRelayConfig" in text
+    assert "function clearRelayConfig" in text
+    assert "keyInput.value = \"\"" in text
+
+
 def test_renderer_script_can_move_sidebar_threads_between_projects():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
 

@@ -22,6 +22,7 @@ from codex_session_delete.helper_server import fetch_ad_list
 from codex_session_delete.markdown_exporter import MarkdownExportService
 from codex_session_delete.models import DeleteResult, DeleteStatus, SessionRef
 from codex_session_delete.provider_sync import ProviderSyncStatus, run_provider_sync
+from codex_session_delete.relay_config import apply_relay_config, clear_relay_config, relay_status
 from codex_session_delete.settings_store import BackendSettings, SettingsStore
 from codex_session_delete.storage_adapter import SQLiteStorageAdapter
 from codex_session_delete.user_scripts import UserScriptManager
@@ -410,6 +411,18 @@ def handle_bridge_request(
         return runtime.repair_backend()
     if path == "/ads" and runtime:
         return runtime.ads()
+    if path == "/relay/status" and runtime:
+        return relay_status().to_dict()
+    if path == "/relay/apply" and runtime:
+        try:
+            return apply_relay_config(str(payload.get("base_url", "")), str(payload.get("api_key", ""))).to_dict()
+        except (OSError, ValueError) as exc:
+            return {"status": "failed", "message": str(exc), "configured": False, "configPath": str(Path.home() / ".codex" / "config.toml")}
+    if path == "/relay/clear" and runtime:
+        try:
+            return clear_relay_config().to_dict()
+        except OSError as exc:
+            return {"status": "failed", "message": str(exc), "configured": False, "configPath": str(Path.home() / ".codex" / "config.toml")}
     if path == "/delete":
         session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
         return service.delete(session).to_dict()

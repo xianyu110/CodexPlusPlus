@@ -119,6 +119,96 @@ def test_handle_bridge_request_returns_ads(tmp_path):
     assert result["ads"][0]["id"] == "runtime-ad"
 
 
+def test_handle_bridge_request_returns_relay_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.relay_status",
+        lambda: type("Status", (), {"to_dict": lambda self: {"configured": True, "configPath": "config.toml"}})(),
+    )
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/relay/status", {}, FakeRuntime(tmp_path))
+
+    assert result == {"configured": True, "configPath": "config.toml"}
+
+
+def test_handle_bridge_request_applies_relay_without_leaking_key(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.apply_relay_config",
+        lambda base_url, api_key: calls.append((base_url, api_key)) or type("Result", (), {"to_dict": lambda self: {"status": "ok", "message": "中转配置已启用", "configured": True}})(),
+    )
+
+    result = handle_bridge_request(
+        FakeDeleteService(),
+        FakeExportService(),
+        "/relay/apply",
+        {"base_url": "https://relay.example.com/v1", "api_key": "sk-ui"},
+        FakeRuntime(tmp_path),
+    )
+
+    assert calls == [("https://relay.example.com/v1", "sk-ui")]
+    assert result == {"status": "ok", "message": "中转配置已启用", "configured": True}
+    assert "sk-ui" not in str(result)
+
+
+def test_handle_bridge_request_reports_invalid_relay_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.apply_relay_config",
+        lambda base_url, api_key: (_ for _ in ()).throw(ValueError("中转 API Key 不能为空")),
+    )
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/relay/apply", {"base_url": "https://relay.example.com/v1"}, FakeRuntime(tmp_path))
+
+    assert result["status"] == "failed"
+    assert result["configured"] is False
+    assert "API Key" in result["message"]
+
+
+def test_handle_bridge_request_reports_relay_apply_io_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.apply_relay_config",
+        lambda base_url, api_key: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    result = handle_bridge_request(
+        FakeDeleteService(),
+        FakeExportService(),
+        "/relay/apply",
+        {"base_url": "https://relay.example.com/v1", "api_key": "sk-ui"},
+        FakeRuntime(tmp_path),
+    )
+
+    assert result["status"] == "failed"
+    assert result["configured"] is False
+    assert "permission denied" in result["message"]
+    assert "sk-ui" not in str(result)
+
+
+def test_handle_bridge_request_clears_relay(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.clear_relay_config",
+        lambda: calls.append(True) or type("Result", (), {"to_dict": lambda self: {"status": "ok", "message": "中转配置已清理", "configured": False}})(),
+    )
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/relay/clear", {}, FakeRuntime(tmp_path))
+
+    assert calls == [True]
+    assert result == {"status": "ok", "message": "中转配置已清理", "configured": False}
+
+
+def test_handle_bridge_request_reports_relay_clear_io_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "codex_session_delete.launcher.clear_relay_config",
+        lambda: (_ for _ in ()).throw(OSError("config locked")),
+    )
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/relay/clear", {}, FakeRuntime(tmp_path))
+
+    assert result["status"] == "failed"
+    assert result["configured"] is False
+    assert "config locked" in result["message"]
+
+
 
 def test_handle_bridge_request_exports_markdown(tmp_path):
     manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")

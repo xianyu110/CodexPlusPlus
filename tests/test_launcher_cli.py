@@ -430,6 +430,46 @@ def test_cli_update_installs_latest_release(monkeypatch, tmp_path, capsys):
     assert "更新完成" in capsys.readouterr().out
 
 
+def test_cli_relay_apply_reads_api_key_from_environment(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setenv("CODEX_PLUS_RELAY_API_KEY", "sk-env")
+    monkeypatch.setattr(
+        cli,
+        "apply_relay_config",
+        lambda base_url, api_key: calls.append((base_url, api_key)) or type("Result", (), {"config_path": Path("config.toml"), "configured": True})(),
+    )
+
+    exit_code = cli.main(["relay-apply", "--base-url", "https://relay.example.com/v1"])
+
+    assert exit_code == 0
+    assert calls == [("https://relay.example.com/v1", "sk-env")]
+    output = capsys.readouterr().out
+    assert "已写入中转配置" in output
+    assert "sk-env" not in output
+
+
+def test_cli_relay_apply_requires_api_key(monkeypatch):
+    monkeypatch.delenv("CODEX_PLUS_RELAY_API_KEY", raising=False)
+
+    with pytest.raises(SystemExit, match="CODEX_PLUS_RELAY_API_KEY"):
+        cli.main(["relay-apply", "--base-url", "https://relay.example.com/v1"])
+
+
+def test_cli_relay_clear_dispatches(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "clear_relay_config",
+        lambda: calls.append(True) or type("Result", (), {"config_path": Path("config.toml"), "configured": False})(),
+    )
+
+    exit_code = cli.main(["relay-clear"])
+
+    assert exit_code == 0
+    assert calls == [True]
+    assert "已清理中转配置" in capsys.readouterr().out
+
+
 def test_cli_remove_alias_uninstalls_with_default_options(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "uninstall_codex_plus_plus", lambda options: calls.append(options))

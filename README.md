@@ -54,6 +54,7 @@ python -m codex_session_delete setup
 - Markdown 导出：按本地 rollout 导出带时间戳的会话 Markdown。
 - 会话项目移动：把会话移动到普通对话或其他本地项目。
 - 对话 Timeline：右侧显示用户提问时间线，悬停摘要，点击跳转。
+- 中转配置：通过 CLI 写入 `CodexPlusPlus` provider，支持快速启用/清理兼容 OpenAI Responses 的中转接口。
 - Provider 同步：切换 model_provider 或供应商时不丢历史会话。
 - Windows 快捷方式、卸载项、可选 watcher 自动接管、GitHub Release 更新。
 - macOS `/Applications/Codex++.app` 生成。
@@ -117,6 +118,12 @@ python -m codex_session_delete remove --remove-data
 python -m codex_session_delete check-update
 python -m codex_session_delete update
 
+# 中转配置（推荐从环境变量读取 Key，避免进入命令历史）
+export CODEX_PLUS_RELAY_API_KEY="sk-..."
+python -m codex_session_delete relay-apply --base-url "https://example.com/v1"
+python -m codex_session_delete relay-status
+python -m codex_session_delete relay-clear
+
 # Windows watcher 自动接管
 python -m codex_session_delete watch-install
 python -m codex_session_delete watch-remove
@@ -136,6 +143,7 @@ python -m codex_session_delete launch \
 ## 数据位置
 
 - Codex 本地数据库：`~/.codex/state_5.sqlite`
+- Codex 中转配置：`~/.codex/config.toml`
 - 删除备份：`~/.codex-session-delete/backups`
 - Provider 同步备份：`~/.codex/backups_state/provider-sync`
 - 启动失败日志：`~/.codex-session-delete/launcher.log`
@@ -183,6 +191,7 @@ codex_session_delete/
   cdp.py                 CDP 通信与 bridge
   helper_server.py       本地 helper 服务
   storage_adapter.py     本地 SQLite 删除/撤销
+  relay_config.py        中转 provider 配置
   provider_sync.py       Provider 同步
   settings_store.py      Codex++ 后端设置
   windows_installer.py   Windows 快捷方式与卸载项

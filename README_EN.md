@@ -54,6 +54,7 @@ After installation, `/Applications/Codex++.app` will be created.
 - Markdown export: export local rollouts as timestamped conversation Markdown.
 - Session project move: move conversations to regular chats or other local projects.
 - Conversation Timeline: show user question markers on the right, preview summaries on hover, and jump on click.
+- Relay configuration: write a `CodexPlusPlus` provider from the CLI to quickly enable or clear an OpenAI Responses-compatible relay.
 - Provider Sync: switch `model_provider` or providers without losing historical conversations.
 - Windows shortcuts, uninstall entries, optional watcher takeover, and GitHub Release updates.
 - macOS `/Applications/Codex++.app` generation.
@@ -117,6 +118,12 @@ python -m codex_session_delete remove --remove-data
 python -m codex_session_delete check-update
 python -m codex_session_delete update
 
+# Relay configuration (prefer environment variables so keys do not enter shell history)
+export CODEX_PLUS_RELAY_API_KEY="sk-..."
+python -m codex_session_delete relay-apply --base-url "https://example.com/v1"
+python -m codex_session_delete relay-status
+python -m codex_session_delete relay-clear
+
 # Windows watcher takeover
 python -m codex_session_delete watch-install
 python -m codex_session_delete watch-remove
@@ -136,6 +143,7 @@ python -m codex_session_delete launch \
 ## Data Locations
 
 - Codex local database: `~/.codex/state_5.sqlite`
+- Codex relay configuration: `~/.codex/config.toml`
 - Delete backups: `~/.codex-session-delete/backups`
 - Provider Sync backups: `~/.codex/backups_state/provider-sync`
 - Launch failure logs: `~/.codex-session-delete/launcher.log`
@@ -183,6 +191,7 @@ codex_session_delete/
   cdp.py                 CDP communication and bridge
   helper_server.py       Local helper service
   storage_adapter.py     Local SQLite delete/undo
+  relay_config.py        Relay provider configuration
   provider_sync.py       Provider Sync
   settings_store.py      Codex++ backend settings
   windows_installer.py   Windows shortcuts and uninstall entries
@@ -206,4 +215,3 @@ https://codex.chatgpt-plus.top/login
 ## Notes
 
 Codex++ is an external enhancement tool and does not modify original Codex App files. If a future Codex App update changes page structure, the injection script may need updates.
-

@@ -10,6 +10,7 @@ from pathlib import Path
 from codex_session_delete.helper_server import HelperServer
 from codex_session_delete.installers import InstallOptions, install_codex_plus_plus, uninstall_codex_plus_plus
 from codex_session_delete.launcher import launch_and_inject, shutdown_helper
+from codex_session_delete.relay_config import apply_relay_config, clear_relay_config, relay_status
 from codex_session_delete import updater
 from codex_session_delete import watcher
 
@@ -57,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("check-update", help="Check GitHub Releases for a newer Codex++ version")
     subparsers.add_parser("update", help="Update Codex++ from the latest GitHub Release")
+
+    subparsers.add_parser("relay-status", help="Show Codex++ relay configuration status")
+    relay_apply_parser = subparsers.add_parser("relay-apply", help="Apply a Codex++ relay provider to ~/.codex/config.toml")
+    relay_apply_parser.add_argument("--base-url", required=True, help="OpenAI-compatible relay base URL, for example https://example.com/v1")
+    relay_apply_parser.add_argument("--api-key", default=None, help="Relay API key. Prefer CODEX_PLUS_RELAY_API_KEY for shell history safety")
+    relay_apply_parser.add_argument("--api-key-env", default="CODEX_PLUS_RELAY_API_KEY", help="Environment variable to read the relay API key from")
+    subparsers.add_parser("relay-clear", help="Remove the Codex++ relay provider from ~/.codex/config.toml")
 
     add_launch_arguments(parser)
     return parser
@@ -204,6 +212,33 @@ def run_update() -> int:
     return 0
 
 
+def run_relay_status() -> int:
+    status = relay_status()
+    print(f"配置文件: {status.config_path}")
+    print(f"中转配置: {'已启用' if status.configured else '未启用'}")
+    print(f"ChatGPT 登录: {'已检测到' if status.authenticated else '未检测到'}")
+    if status.account_label:
+        print(f"账号: {status.account_label}")
+    return 0
+
+
+def run_relay_apply(args: argparse.Namespace) -> int:
+    api_key = args.api_key or os.environ.get(args.api_key_env, "")
+    if not api_key:
+        raise SystemExit(f"请通过 --api-key 或环境变量 {args.api_key_env} 提供中转 API Key")
+    result = apply_relay_config(args.base_url, api_key)
+    print(f"已写入中转配置: {result.config_path}")
+    print(f"中转配置: {'已启用' if result.configured else '未启用'}")
+    return 0
+
+
+def run_relay_clear() -> int:
+    result = clear_relay_config()
+    print(f"已清理中转配置: {result.config_path}")
+    print(f"中转配置: {'已启用' if result.configured else '未启用'}")
+    return 0
+
+
 WATCHER_RUN_NAME = "CodexPlusPlusWatcher"
 WATCHER_RUN_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 WATCHER_STARTUP_SHORTCUT_NAME = "CodexPlusPlusWatcher.lnk"
@@ -323,6 +358,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_check_update()
     if args.command == "update":
         return run_update()
+    if args.command == "relay-status":
+        return run_relay_status()
+    if args.command == "relay-apply":
+        return run_relay_apply(args)
+    if args.command == "relay-clear":
+        return run_relay_clear()
     return run_launch(args)
 
 

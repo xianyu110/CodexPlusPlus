@@ -375,6 +375,19 @@
       .codex-plus-backend-label[data-status="failed"] { color: #f87171; }
       .codex-plus-backend-repair { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
       .codex-plus-backend-repair[hidden] { display: none; }
+      .codex-plus-text-input {
+        width: min(320px, 100%);
+        margin-top: 6px;
+        border: 1px solid rgba(255,255,255,.18);
+        border-radius: 7px;
+        background: rgba(24,24,27,.9);
+        color: #f3f4f6;
+        font: 12px system-ui, sans-serif;
+        padding: 7px 8px;
+        outline: none;
+      }
+      .codex-plus-text-input:focus { border-color: #10a37f; box-shadow: 0 0 0 2px rgba(16,163,127,.18); }
+      .codex-plus-text-input::placeholder { color: #71717a; }
       .codex-plus-user-script-warning { margin-top: 4px; color: #fbbf24; font-size: 12px; }
       .codex-plus-user-script-dirs { margin-top: 6px; color: #a1a1aa; font-size: 11px; line-height: 1.4; word-break: break-all; }
       .codex-plus-user-script-list { margin-top: 8px; display: grid; gap: 6px; }
@@ -533,6 +546,7 @@
 
   let codexPlusUserScripts = { enabled: true, builtin_dir: "", user_dir: "", scripts: [] };
   let codexPlusBackendStatus = { status: "checking", message: "正在检查后端…" };
+  let codexPlusRelayStatus = { configured: false, authenticated: false, configPath: "", accountLabel: "", message: "" };
 
   function renderBackendStatus() {
     const status = codexPlusBackendStatus.status || "failed";
@@ -613,6 +627,59 @@
     }
   }
 
+  function renderRelayStatus() {
+    const status = document.querySelector("[data-codex-relay-status]");
+    if (status) {
+      status.dataset.status = codexPlusRelayStatus.configured ? "ok" : "failed";
+      status.textContent = codexPlusRelayStatus.configured ? "中转已启用" : "中转未启用";
+    }
+    const auth = document.querySelector("[data-codex-relay-auth]");
+    if (auth) auth.textContent = codexPlusRelayStatus.authenticated ? `ChatGPT 登录：已检测到${codexPlusRelayStatus.accountLabel ? `（${codexPlusRelayStatus.accountLabel}）` : ""}` : "ChatGPT 登录：未检测到";
+    const path = document.querySelector("[data-codex-relay-config-path]");
+    if (path) path.textContent = codexPlusRelayStatus.configPath || "~/.codex/config.toml";
+    const message = document.querySelector("[data-codex-relay-message]");
+    if (message) message.textContent = codexPlusRelayStatus.message || "";
+  }
+
+  async function loadRelayStatus() {
+    try {
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, ...(await postJson("/relay/status", {})) };
+    } catch (_) {
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, message: "读取中转状态失败" };
+    }
+    renderRelayStatus();
+  }
+
+  async function applyRelayConfig() {
+    const baseUrl = document.querySelector("[data-codex-relay-base-url]")?.value || "";
+    const apiKey = document.querySelector("[data-codex-relay-api-key]")?.value || "";
+    codexPlusRelayStatus = { ...codexPlusRelayStatus, message: "正在写入中转配置…" };
+    renderRelayStatus();
+    try {
+      const result = await postJson("/relay/apply", { base_url: baseUrl, api_key: apiKey });
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, ...result, message: result.message || "" };
+      const keyInput = document.querySelector("[data-codex-relay-api-key]");
+      if (result.status === "ok" && keyInput) keyInput.value = "";
+      await loadRelayStatus();
+    } catch (_) {
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, message: "写入中转配置失败" };
+      renderRelayStatus();
+    }
+  }
+
+  async function clearRelayConfig() {
+    codexPlusRelayStatus = { ...codexPlusRelayStatus, message: "正在清理中转配置…" };
+    renderRelayStatus();
+    try {
+      const result = await postJson("/relay/clear", {});
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, ...result, message: result.message || "" };
+      await loadRelayStatus();
+    } catch (_) {
+      codexPlusRelayStatus = { ...codexPlusRelayStatus, message: "清理中转配置失败" };
+      renderRelayStatus();
+    }
+  }
+
   const codexPlusAdsUrl = "/ads";
   let codexPlusAds = [];
   let codexPlusAdsLoaded = false;
@@ -688,6 +755,7 @@
       panel.hidden = panel.getAttribute("data-codex-plus-panel") !== tab;
     });
     if (tab === "userScripts") loadUserScripts();
+    if (tab === "relay") loadRelayStatus();
   }
 
   function openCodexPlusModal() {
@@ -703,6 +771,7 @@
         </div>
         <div class="codex-plus-tabs" role="tablist" aria-label="Codex++">
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="home" data-active="true">主页</button>
+          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="relay" data-active="false">中转配置</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="userScripts" data-active="false">用户脚本</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>
         </div>
@@ -757,6 +826,38 @@
             <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">提出问题</div><div class="codex-plus-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
               <button type="button" class="codex-plus-issue-button" data-codex-plus-issue="true">提出问题</button>
+            </div>
+          </div>
+          <div class="codex-plus-panel" data-codex-plus-panel="relay" hidden>
+            <div class="codex-plus-row">
+              <div>
+                <div class="codex-plus-row-title">中转状态</div>
+                <div class="codex-plus-row-description">写入 CodexPlusPlus provider 到本机 Codex 配置，适合已登录 ChatGPT 但希望请求走兼容 OpenAI Responses 的中转接口。</div>
+                <div class="codex-plus-backend-label" data-codex-relay-status="true" data-status="failed">中转未启用</div>
+                <div class="codex-plus-row-description" data-codex-relay-auth="true">ChatGPT 登录：正在检查…</div>
+                <div class="codex-plus-row-description">配置文件：<span data-codex-relay-config-path="true">~/.codex/config.toml</span></div>
+                <div class="codex-plus-user-script-warning" data-codex-relay-message="true"></div>
+              </div>
+              <button type="button" class="codex-plus-action-button" data-codex-relay-refresh="true">刷新状态</button>
+            </div>
+            <div class="codex-plus-row">
+              <div>
+                <div class="codex-plus-row-title">Base URL</div>
+                <input class="codex-plus-text-input" data-codex-relay-base-url="true" type="url" placeholder="https://example.com/v1">
+              </div>
+            </div>
+            <div class="codex-plus-row">
+              <div>
+                <div class="codex-plus-row-title">API Key</div>
+                <input class="codex-plus-text-input" data-codex-relay-api-key="true" type="password" autocomplete="off" placeholder="只用于写入本机配置，不会显示在状态里">
+              </div>
+            </div>
+            <div class="codex-plus-row">
+              <div><div class="codex-plus-row-title">应用或清理</div><div class="codex-plus-row-description">应用后会写入 model_provider = "CodexPlusPlus"；清理会移除 Codex++ 中转 provider，并保留其他 Codex 配置。</div></div>
+              <div class="codex-plus-user-script-actions">
+                <button type="button" class="codex-plus-action-button" data-codex-relay-apply="true">应用中转</button>
+                <button type="button" class="codex-plus-user-script-reload" data-codex-relay-clear="true">清理中转</button>
+              </div>
             </div>
           </div>
           <div class="codex-plus-panel" data-codex-plus-panel="userScripts" hidden>
@@ -828,6 +929,18 @@
         loadUserScripts("/user-scripts/reload", {});
         return;
       }
+      if (target?.closest("[data-codex-relay-refresh]")) {
+        loadRelayStatus();
+        return;
+      }
+      if (target?.closest("[data-codex-relay-apply]")) {
+        applyRelayConfig();
+        return;
+      }
+      if (target?.closest("[data-codex-relay-clear]")) {
+        clearRelayConfig();
+        return;
+      }
       const toggle = target?.closest("[data-codex-plus-setting]");
       if (toggle) {
         const key = toggle.getAttribute("data-codex-plus-setting");
@@ -849,6 +962,7 @@
     renderBackendStatus();
     loadBackendSettings();
     loadUserScripts();
+    loadRelayStatus();
   }
 
   function findNativeMenuInsertionPoint() {
