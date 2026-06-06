@@ -1,13 +1,12 @@
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .venv/
 venv/
+.worktrees/
 *.egg-info/
 build/
 dist/
+target/
+apps/codex-plus-manager/src-tauri/gen/
 
 .codex_asar_extract/
 .codex_asar_extract_latest/

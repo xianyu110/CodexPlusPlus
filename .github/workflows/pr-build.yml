@@ -1,20 +1,21 @@
-name: Release assets
+name: PR build artifacts
 
 on:
-  release:
-    types: [published]
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  windows-installer:
+  windows-artifacts:
+    name: Windows artifacts
     runs-on: windows-latest
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -31,11 +32,18 @@ jobs:
         working-directory: apps/codex-plus-manager
         run: npm install --package-lock=false
 
+      - name: TypeScript check
+        working-directory: apps/codex-plus-manager
+        run: npm run check
+
       - name: Build frontend
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
-      - name: Build binaries
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Build release binaries
         run: cargo build --release
 
       - name: Stage Windows app files
@@ -48,7 +56,10 @@ jobs:
       - name: Build Windows installer
         shell: pwsh
         run: |
-          $version = "${{ github.event.release.tag_name }}".TrimStart("v", "V")
+          $version = "${{ github.ref_name }}".TrimStart("v", "V")
+          if (-not $version -or $version -eq "main") {
+            $version = "0.0.0-${{ github.run_number }}"
+          }
           $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) {
             $makensis = "makensis"
@@ -57,11 +68,19 @@ jobs:
           & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" CodexPlusPlus.nsi
           Pop-Location
 
-      - name: Upload Windows installer
-        uses: softprops/action-gh-release@v2
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: dist/windows/*.exe
+          name: codex-plus-plus-windows-binaries
+          path: dist/windows/app/*
+          if-no-files-found: error
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-plus-plus-windows-installer
+          path: dist/windows/*.exe
+          if-no-files-found: error
 
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
@@ -77,10 +96,8 @@ jobs:
             runner: macos-14
             target: aarch64-apple-darwin
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -100,62 +117,21 @@ jobs:
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
-      - name: Build binaries
+      - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION#V}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
+            VERSION="0.0.0-${GITHUB_RUN_NUMBER}"
+          fi
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Upload macOS DMG
-        uses: softprops/action-gh-release@v2
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: dist/macos/*.dmg
-
-  latest-json:
-    name: Upload static latest.json
-    runs-on: ubuntu-latest
-    needs:
-      - windows-installer
-      - macos-dmg
-    steps:
-      - name: Generate latest.json
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release view "$TAG" --repo "$REPO" --json assets,body,tagName,url > release.json
-          node <<'NODE'
-          const fs = require("fs");
-          const release = JSON.parse(fs.readFileSync("release.json", "utf8"));
-          const repo = process.env.REPO;
-          const tag = release.tagName || process.env.TAG;
-          const version = tag.replace(/^v/i, "");
-          const baseUrl = `https://github.com/${repo}/releases/download/${tag}`;
-          const assets = (release.assets || [])
-            .map((asset) => asset.name)
-            .filter((name) => name !== "latest.json")
-            .map((name) => ({ name, url: `${baseUrl}/${encodeURIComponent(name)}` }));
-          const payload = {
-            version: `v${version}`,
-            url: release.url || `https://github.com/${repo}/releases/tag/${tag}`,
-            body: release.body || "",
-            assets
-          };
-          fs.writeFileSync("latest.json", `${JSON.stringify(payload, null, 2)}\n`);
-          NODE
-          cat latest.json
-
-      - name: Upload latest.json
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
-          REPO: ${{ github.repository }}
-        shell: bash
-        run: gh release upload "$TAG" latest.json --clobber --repo "$REPO"
+          name: codex-plus-plus-macos-${{ matrix.arch }}-dmg
+          path: dist/macos/*.dmg
+          if-no-files-found: error

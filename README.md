@@ -12,52 +12,46 @@
   <img alt="Release" src="https://img.shields.io/github/v/release/BigPizzaV3/CodexPlusPlus">
   <img alt="Stars" src="https://img.shields.io/github/stars/BigPizzaV3/CodexPlusPlus">
   <img alt="License" src="https://img.shields.io/github/license/BigPizzaV3/CodexPlusPlus">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
+  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-Codex++ 是面向 Codex App 的外部增强启动器：不修改原始安装文件，通过 Chromium DevTools Protocol 注入增强脚本。
+Codex++ 是面向 Codex App 的外部增强启动器和管理工具：不修改原始安装文件，通过 Chromium DevTools Protocol 注入增强脚本。
 
 ## 快速使用
 
-Windows 用户双击项目根目录的 `setup.bat`，选择：
+从 [GitHub Releases](https://github.com/BigPizzaV3/CodexPlusPlus/releases) 下载最新版安装包：
 
-```text
-[1] Install Codex++
-```
+- Windows：`CodexPlusPlus-*-windows-x64-setup.exe`
+- macOS Intel：`CodexPlusPlus-*-macos-x64.dmg`
+- macOS Apple Silicon：`CodexPlusPlus-*-macos-arm64.dmg`
 
-安装后双击桌面 `Codex++.lnk` 启动。
+安装后会有两个入口：
 
-命令行安装/启动：
+- `Codex++`：静默启动入口，不显示管理界面，只负责启动 Codex 并注入增强功能。
+- `Codex++ 管理工具`：Tauri 控制面板，用于启动、检查、修复、更新、管理增强功能、中转注入和用户脚本。
 
-```bash
-python -m pip install -e .
-python -m codex_session_delete setup
-python -m codex_session_delete launch
-```
-
-macOS：
-
-```bash
-python -m codex_session_delete setup
-```
-
-安装后会生成 `/Applications/Codex++.app`。
-
-
+Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安装 `/Applications/Codex++.app` 和 `/Applications/Codex++ 管理工具.app`。
 
 ## 功能亮点
 
-- 顶部 `Codex++` 菜单：集中管理增强功能。
+- Rust 后端和静默 launcher：启动时不依赖 Python 运行时。
+- Tauri + React 管理工具：集中启动、诊断、修复、更新和管理增强功能。
+- 插件市场解锁：API Key 模式下扩展插件市场请求，尽量显示完整插件列表。
 - 插件入口解锁：API Key 模式下显示并启用插件入口。
 - 特殊插件强制安装：解除 App unavailable / 应用不可用导致的前端安装禁用。
 - 会话删除：悬停显示删除按钮，删除前确认并支持撤销。
 - Markdown 导出：按本地 rollout 导出带时间戳的会话 Markdown。
 - 会话项目移动：把会话移动到普通对话或其他本地项目。
 - 对话 Timeline：右侧显示用户提问时间线，悬停摘要，点击跳转。
-- 中转配置：通过 CLI 写入 `CodexPlusPlus` provider，支持快速启用/清理兼容 OpenAI Responses 的中转接口。
+- 用户脚本独立管理：可在启动时注入自定义脚本。
+- 中转注入：支持多个中转配置，写入 `CodexPlusPlus` provider，并可切回官方 ChatGPT 登录态。
 - Provider 同步：切换 model_provider 或供应商时不丢历史会话。
-- Windows 快捷方式、卸载项、可选 watcher 自动接管、GitHub Release 更新。
-- macOS `/Applications/Codex++.app` 生成。
+- Zed 打开入口：识别远程 SSH 上下文后，可从 Codex 直接打开对应文件到 Zed Remote Development。
+- Upstream worktree 创建：可从 `upstream/<base-branch>` 创建新 worktree，创建前自动 fetch 远端分支。
+- GitHub Release 自动更新，管理工具和静默启动器都会检测可用更新。
+- Windows 单实例、无黑框启动、管理员权限清单、系统桌面路径识别。
+- macOS x64/arm64 分架构 DMG，静默入口隐藏 Dock 图标。
 
 ## 痛点与解决
 
@@ -90,6 +84,32 @@ Codex++ 启动后会解锁插件入口，并在会话列表悬停时显示删除
 
 这种方式不会修改 Codex 的 `app.asar`，也不需要往 Codex 安装目录写 DLL。
 
+## 中转注入
+
+中转注入适合已经在 Codex/ChatGPT 中完成官方账号登录，同时希望把模型请求转到自定义兼容 API 的场景。
+
+在管理工具的“中转注入”页面：
+
+1. 确认已经检测到 ChatGPT 登录状态。
+2. 添加一个或多个中转配置，填写 Base URL 和 Key。
+3. 选择当前配置并应用中转注入。
+4. 启动 `Codex++`。
+
+Codex++ 会在 `~/.codex/config.toml` 中写入类似配置：
+
+```toml
+model_provider = "CodexPlusPlus"
+
+[model_providers.CodexPlusPlus]
+name = "CodexPlusPlus"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://example.com/v1"
+experimental_bearer_token = "sk-..."
+```
+
+如果需要回到官方登录态，在“中转注入”页面点击清除 API 模式即可移除 `OPENAI_API_KEY` 相关配置并切回官方 ChatGPT 登录模式。
+
 ## Provider 同步
 
 启用 `Provider 同步` 后，Codex++ 会在启动前同步本地会话 metadata，让切换供应商后历史会话仍能在 Desktop 和 `/resume` 中显示。
@@ -99,110 +119,103 @@ Codex++ 启动后会解锁插件入口，并在会话列表悬停时显示删除
 ## 常用命令
 
 ```bash
-# 安装依赖
-python -m pip install -e .
+# 前端检查
+cd apps/codex-plus-manager
+npm install
+npm run check
+npm run vite:build
 
-# 启动
-python -m codex_session_delete launch
-
-# 安装快捷方式 / app bundle
-python -m codex_session_delete setup
-
-# 卸载
-python -m codex_session_delete remove
-
-# 同时删除日志和备份
-python -m codex_session_delete remove --remove-data
-
-# 检查更新 / 更新
-python -m codex_session_delete check-update
-python -m codex_session_delete update
-
-# 中转配置（推荐从环境变量读取 Key，避免进入命令历史）
-export CODEX_PLUS_RELAY_API_KEY="sk-..."
-python -m codex_session_delete relay-apply --base-url "https://example.com/v1"
-python -m codex_session_delete relay-status
-python -m codex_session_delete relay-clear
-
-# Windows watcher 自动接管
-python -m codex_session_delete watch-install
-python -m codex_session_delete watch-remove
-python -m codex_session_delete watch-disable
-python -m codex_session_delete watch-enable
-```
-
-直接指定 Codex 安装目录：
-
-```bash
-python -m codex_session_delete launch \
-  --app-dir "C:/Program Files/WindowsApps/OpenAI.Codex_xxx/app" \
-  --debug-port 9229 \
-  --helper-port 57321
+# Rust 检查
+cd ../..
+cargo fmt --check
+cargo test
+cargo build --release
 ```
 
 ## 数据位置
 
+- Codex 配置：`~/.codex/config.toml`
+- Codex 登录状态：`~/.codex/auth.json`
 - Codex 本地数据库：`~/.codex/state_5.sqlite`
-- Codex 中转配置：`~/.codex/config.toml`
-- 删除备份：`~/.codex-session-delete/backups`
+- Codex++ 状态与日志：`~/.codex-session-delete/`
 - Provider 同步备份：`~/.codex/backups_state/provider-sync`
-- 启动失败日志：`~/.codex-session-delete/launcher.log`
-- watcher 日志：`%USERPROFILE%\.codex-session-delete\watcher.log`
 
 ## 常见问题
 
-### 双击 Codex++ 没反应
-
-查看日志：`%USERPROFILE%\.codex-session-delete\launcher.log`
-
-常见原因：Codex App 未安装或路径变化、9229 端口被占用、Python 环境不可用。
-
 ### Codex++ 菜单没出现
 
-确认是从 `Codex++` 快捷方式启动，而不是原版 Codex。也可以检查 Codex 是否带有 `--remote-debugging-port=9229`。
+确认是从 `Codex++` 入口启动，而不是原版 Codex。也可以打开管理工具的“诊断”和“日志”页面查看注入状态。
 
-### 技能推荐加载失败
+### 插件内显示后端连不上
 
-如果提示 `git fetch failed` 或无法连接 GitHub，通常是网络无法直连 GitHub。Codex++ 会继承代理环境变量，也会自动探测常见本地代理端口。也可以手动指定：
+先在浏览器或 PowerShell 里测试：
 
 ```powershell
-$env:HTTP_PROXY="http://127.0.0.1:7897"
-$env:HTTPS_PROXY="http://127.0.0.1:7897"
-python -m codex_session_delete launch
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:57321/backend/status -Body "{}" -ContentType "application/json"
 ```
 
-### 切换供应商后旧会话不见了
+如果接口正常，但插件仍显示超时，通常是 Codex 页面里的 CDP bridge 或脚本缓存问题。重启 Codex++，或在管理工具里查看日志中的 `renderer.script_loaded`、`bridge.request`、`bridge.response`。
 
-打开 `Codex++` 设置面板，启用 `Provider 同步` 后重启 Codex++。
+### Upstream worktree 和 Codex 原生创建有什么区别
+
+Codex++ 的 Upstream worktree 功能等价于先更新远端分支，再执行：
+
+```bash
+git worktree add -b <new-branch> <worktree-path> upstream/<base-branch>
+```
+
+这样新 worktree 从最新的远端跟踪分支开始，而不是从当前会话所在的本地 HEAD 开始。
+
+### macOS 提示无法打开或已损坏
+
+当前安装包未签名/未公证时，macOS Gatekeeper 可能拦截，出现“已损坏，无法打开”的提示：
+
+![macOS 提示 Codex++ 管理工具已损坏](docs/images/macos-damaged-warning.png)
+
+如果遇到该提示，可以在终端执行下面两条命令，解除苹果系统的安全隔离限制：
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/Codex++\ 管理工具.app
+sudo xattr -rd com.apple.quarantine /Applications/Codex++.app
+```
+
+执行后重新打开 `Codex++` 或 `Codex++ 管理工具` 即可。
+
+### macOS Intel 能用吗
+
+可以。Release 会分别提供 `macos-x64.dmg` 和 `macos-arm64.dmg`。Intel Mac 下载 x64 包，Apple Silicon 下载 arm64 包。
 
 ## 开发
 
 ```bash
-python -m pip install -e .[test]
-python -m pytest -q
+# 前端检查
+cd apps/codex-plus-manager
+npm install
+npm run check
+npm run vite:build
+
+# Rust 检查
+cd ../..
+cargo fmt --check
+cargo test
+cargo build --release
 ```
 
 主要结构：
 
 ```text
-codex_session_delete/
-  cli.py                 CLI 入口
-  launcher.py            启动 Codex 并注入脚本
-  cdp.py                 CDP 通信与 bridge
-  helper_server.py       本地 helper 服务
-  storage_adapter.py     本地 SQLite 删除/撤销
-  relay_config.py        中转 provider 配置
-  provider_sync.py       Provider 同步
-  settings_store.py      Codex++ 后端设置
-  windows_installer.py   Windows 快捷方式与卸载项
-  macos_installer.py     macOS app bundle 安装
-  watcher.py             Windows watcher（可选）
-  inject/renderer-inject.js
-
-tests/                   自动化测试
+apps/
+  codex-plus-launcher/          静默启动入口
+  codex-plus-manager/           Tauri 管理工具
+assets/inject/
+  renderer-inject.js            注入到 Codex 渲染端的增强脚本
+crates/
+  codex-plus-core/              启动、注入、配置、更新、安装、桥接等核心逻辑
+  codex-plus-data/              会话数据、导出、Provider 同步
+scripts/installer/
+  windows/CodexPlusPlus.nsi     Windows NSIS 安装包
+  macos/package-dmg.sh          macOS DMG 打包
 ```
-
-
 
 ## Codex国内使用
 
@@ -210,8 +223,6 @@ https://codex.chatgpt-plus.top/login
 
 https://codex2.chatgpt-plus.top/login
 <img width="260" height="260" alt="image" src="https://github.com/user-attachments/assets/cf6ecb47-9a32-4410-adc0-f3b489e4c6d6" />
-
-
 
 ## 说明
 

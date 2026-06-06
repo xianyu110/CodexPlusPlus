@@ -12,52 +12,46 @@
   <img alt="Release" src="https://img.shields.io/github/v/release/BigPizzaV3/CodexPlusPlus">
   <img alt="Stars" src="https://img.shields.io/github/stars/BigPizzaV3/CodexPlusPlus">
   <img alt="License" src="https://img.shields.io/github/license/BigPizzaV3/CodexPlusPlus">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
+  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-Codex++ is an external enhancement launcher for the Codex App: it does not modify the original installation files, and injects enhancement scripts through the Chromium DevTools Protocol.
+Codex++ is an external enhancement launcher and manager for the Codex App: it does not modify the original installation files, and injects enhancement scripts through the Chromium DevTools Protocol.
 
 ## Quick Start
 
-On Windows, double-click `setup.bat` in the project root and choose:
+Download the latest installer from [GitHub Releases](https://github.com/BigPizzaV3/CodexPlusPlus/releases):
 
-```text
-[1] Install Codex++
-```
+- Windows: `CodexPlusPlus-*-windows-x64-setup.exe`
+- macOS Intel: `CodexPlusPlus-*-macos-x64.dmg`
+- macOS Apple Silicon: `CodexPlusPlus-*-macos-arm64.dmg`
 
-After installation, double-click the desktop `Codex++.lnk` shortcut to launch.
+After installation, there are two entries:
 
-Command-line install/launch:
+- `Codex++`: silent launcher that starts Codex and injects enhancements without showing the manager UI.
+- `Codex++ Manager`: Tauri control panel for launch, diagnostics, repair, updates, enhancement settings, relay injection, and user scripts.
 
-```bash
-python -m pip install -e .
-python -m codex_session_delete setup
-python -m codex_session_delete launch
-```
-
-macOS:
-
-```bash
-python -m codex_session_delete setup
-```
-
-After installation, `/Applications/Codex++.app` will be created.
-
-
+The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG installs `/Applications/Codex++.app` and `/Applications/Codex++ 管理工具.app`.
 
 ## Highlights
 
-- Top-bar `Codex++` menu: manage enhancement features in one place.
+- Rust backend and silent launcher: no Python runtime required at startup.
+- Tauri + React manager: launch, diagnose, repair, update, and manage enhancements in one place.
+- Plugin marketplace unlock: expand plugin marketplace requests in API Key mode to show a more complete plugin list.
 - Plugin entry unlock: show and enable the plugin entry in API Key mode.
 - Forced special plugin installation: bypass frontend disablement caused by App unavailable states.
 - Session deletion: show a delete button on hover, confirm before deletion, and support undo.
 - Markdown export: export local rollouts as timestamped conversation Markdown.
 - Session project move: move conversations to regular chats or other local projects.
 - Conversation Timeline: show user question markers on the right, preview summaries on hover, and jump on click.
-- Relay configuration: write a `CodexPlusPlus` provider from the CLI to quickly enable or clear an OpenAI Responses-compatible relay.
+- User script management: inject custom scripts at launch.
+- Relay injection: manage multiple relay profiles, write a `CodexPlusPlus` provider, and switch back to official ChatGPT auth.
 - Provider Sync: switch `model_provider` or providers without losing historical conversations.
-- Windows shortcuts, uninstall entries, optional watcher takeover, and GitHub Release updates.
-- macOS `/Applications/Codex++.app` generation.
+- Zed open entry: open remote SSH file references directly in Zed Remote Development.
+- Upstream worktree creation: create a new worktree from `upstream/<base-branch>` after fetching the latest remote branch.
+- GitHub Release auto-update checks for both the manager and silent launcher.
+- Windows single instance, no console window, administrator manifest, and desktop path detection.
+- macOS x64/arm64 DMGs, with the silent entry hidden from the Dock.
 
 ## Pain Points and Fixes
 
@@ -90,6 +84,32 @@ The top bar shows `Codex++`, where you can view backend status and open the sett
 
 This approach does not modify Codex `app.asar` and does not write DLL files into the Codex installation directory.
 
+## Relay Injection
+
+Relay injection is for users who have completed official Codex/ChatGPT login and want model requests to go through a custom compatible API.
+
+In the manager's Relay Injection page:
+
+1. Confirm ChatGPT login has been detected.
+2. Add one or more relay profiles with Base URL and Key.
+3. Select the current profile and apply relay injection.
+4. Launch `Codex++`.
+
+Codex++ writes a config like this to `~/.codex/config.toml`:
+
+```toml
+model_provider = "CodexPlusPlus"
+
+[model_providers.CodexPlusPlus]
+name = "CodexPlusPlus"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://example.com/v1"
+experimental_bearer_token = "sk-..."
+```
+
+To return to official auth, click clear API mode in the Relay Injection page.
+
 ## Provider Sync
 
 When `Provider Sync` is enabled, Codex++ synchronizes local session metadata before launch so historical conversations remain visible in Desktop and `/resume` after switching providers.
@@ -99,118 +119,109 @@ The sync covers rollout files, SQLite thread records, and project path caches. I
 ## Common Commands
 
 ```bash
-# Install dependencies
-python -m pip install -e .
+# Frontend checks
+cd apps/codex-plus-manager
+npm install
+npm run check
+npm run vite:build
 
-# Launch
-python -m codex_session_delete launch
-
-# Install shortcut / app bundle
-python -m codex_session_delete setup
-
-# Remove
-python -m codex_session_delete remove
-
-# Also delete logs and backups
-python -m codex_session_delete remove --remove-data
-
-# Check for updates / update
-python -m codex_session_delete check-update
-python -m codex_session_delete update
-
-# Relay configuration (prefer environment variables so keys do not enter shell history)
-export CODEX_PLUS_RELAY_API_KEY="sk-..."
-python -m codex_session_delete relay-apply --base-url "https://example.com/v1"
-python -m codex_session_delete relay-status
-python -m codex_session_delete relay-clear
-
-# Windows watcher takeover
-python -m codex_session_delete watch-install
-python -m codex_session_delete watch-remove
-python -m codex_session_delete watch-disable
-python -m codex_session_delete watch-enable
-```
-
-Specify the Codex installation directory directly:
-
-```bash
-python -m codex_session_delete launch \
-  --app-dir "C:/Program Files/WindowsApps/OpenAI.Codex_xxx/app" \
-  --debug-port 9229 \
-  --helper-port 57321
+# Rust checks
+cd ../..
+cargo fmt --check
+cargo test
+cargo build --release
 ```
 
 ## Data Locations
 
+- Codex configuration: `~/.codex/config.toml`
+- Codex auth state: `~/.codex/auth.json`
 - Codex local database: `~/.codex/state_5.sqlite`
-- Codex relay configuration: `~/.codex/config.toml`
-- Delete backups: `~/.codex-session-delete/backups`
+- Codex++ state and logs: `~/.codex-session-delete/`
 - Provider Sync backups: `~/.codex/backups_state/provider-sync`
-- Launch failure logs: `~/.codex-session-delete/launcher.log`
-- Watcher logs: `%USERPROFILE%\.codex-session-delete\watcher.log`
 
 ## FAQ
 
-### Double-clicking Codex++ does nothing
-
-Check the log: `%USERPROFILE%\.codex-session-delete\launcher.log`
-
-Common causes: Codex App is not installed or its path changed, port 9229 is already in use, or Python is unavailable.
-
 ### The Codex++ menu does not appear
 
-Make sure you launched from the `Codex++` shortcut instead of the original Codex. You can also check whether Codex has `--remote-debugging-port=9229`.
+Make sure you launched from the `Codex++` entry instead of the original Codex. You can also open the manager's Diagnostics and Logs pages to inspect injection status.
 
-### Skill recommendations fail to load
+### The plugin says the backend is disconnected
 
-If you see `git fetch failed` or cannot connect to GitHub, your network usually cannot reach GitHub directly. Codex++ inherits proxy environment variables and also auto-detects common local proxy ports. You can specify one manually:
+Test the backend first:
 
 ```powershell
-$env:HTTP_PROXY="http://127.0.0.1:7897"
-$env:HTTPS_PROXY="http://127.0.0.1:7897"
-python -m codex_session_delete launch
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:57321/backend/status -Body "{}" -ContentType "application/json"
 ```
 
-### Old conversations disappear after switching providers
+If the endpoint works but the plugin still times out, it is usually a Codex page CDP bridge or script cache issue. Restart Codex++, or check manager logs for `renderer.script_loaded`, `bridge.request`, and `bridge.response`.
 
-Open the `Codex++` settings panel, enable `Provider Sync`, then restart Codex++.
+### How is Upstream worktree different from native Codex worktree creation?
+
+Codex++ first updates the remote branch, then runs:
+
+```bash
+git worktree add -b <new-branch> <worktree-path> upstream/<base-branch>
+```
+
+This creates the new worktree from the latest remote tracking branch instead of the local HEAD used by the current conversation.
+
+### macOS says the app cannot be opened or is damaged
+
+If the package is unsigned or not notarized, macOS Gatekeeper may block it:
+
+![macOS damaged warning](docs/images/macos-damaged-warning.png)
+
+Run these commands to remove the quarantine attribute:
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/Codex++\ 管理工具.app
+sudo xattr -rd com.apple.quarantine /Applications/Codex++.app
+```
+
+Then reopen `Codex++` or `Codex++ 管理工具`.
+
+### Does macOS Intel work?
+
+Yes. Releases provide both `macos-x64.dmg` and `macos-arm64.dmg`. Intel Mac users should download x64; Apple Silicon users should download arm64.
 
 ## Development
 
 ```bash
-python -m pip install -e .[test]
-python -m pytest -q
+# Frontend checks
+cd apps/codex-plus-manager
+npm install
+npm run check
+npm run vite:build
+
+# Rust checks
+cd ../..
+cargo fmt --check
+cargo test
+cargo build --release
 ```
 
 Main structure:
 
 ```text
-codex_session_delete/
-  cli.py                 CLI entry point
-  launcher.py            Launches Codex and injects scripts
-  cdp.py                 CDP communication and bridge
-  helper_server.py       Local helper service
-  storage_adapter.py     Local SQLite delete/undo
-  relay_config.py        Relay provider configuration
-  provider_sync.py       Provider Sync
-  settings_store.py      Codex++ backend settings
-  windows_installer.py   Windows shortcuts and uninstall entries
-  macos_installer.py     macOS app bundle setup
-  watcher.py             Windows watcher (optional)
-  inject/renderer-inject.js
-
-tests/                   Automated tests
+apps/
+  codex-plus-launcher/          Silent launcher entry
+  codex-plus-manager/           Tauri manager
+assets/inject/
+  renderer-inject.js            Enhancement script injected into the Codex renderer
+crates/
+  codex-plus-core/              Launch, injection, config, update, install, bridge logic
+  codex-plus-data/              Session data, export, Provider Sync
+scripts/installer/
+  windows/CodexPlusPlus.nsi     Windows NSIS installer
+  macos/package-dmg.sh          macOS DMG packaging
 ```
-
-
 
 ## Codex Usage in China
 
 https://codex.chatgpt-plus.top/login
 
 <img width="520" height="520" alt="image" src="https://github.com/user-attachments/assets/272ce57d-3750-482e-9e9e-026bac4a0743" />
-
-
 
 ## Notes
 
