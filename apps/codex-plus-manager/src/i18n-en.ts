@@ -16,8 +16,9 @@ export const EN_PLAIN: Record<string, string> = {
   "Codex 意外停止": "Codex stopped unexpectedly",
   "Codex 版本": "Codex version",
   "Codex 目标": "Codex goals",
-  "Codex++ 官方中转站，主打稳定接入和划算价格，支持 GPT-5.6 全系列、GPT-5.5、GPT-5.4、Claude Opus 4.8、Claude Opus 4.7、gpt-image-2 等模型与图像能力。":
-    "The official Codex++ relay, built for stable access and good value, supporting the full GPT-5.6 family, GPT-5.5, GPT-5.4, Claude Opus 4.8, Claude Opus 4.7, gpt-image-2 and other models plus image capabilities.",
+  "Cloudflare 入口已启用 Cloudflare，国内无法打开时需要使用代理，适合国外用户使用。":
+    "The Cloudflare endpoint is intended for users outside China. A proxy may be required if it cannot be reached from within China.",
+  "Cloudflare 入口（适合国外用户）": "Cloudflare endpoint (outside China)",
   "Codex++ 导入": "Codex++ import",
   "Codex++ 版本": "Codex++ version",
   "Codex增强": "Codex enhancements",
@@ -246,7 +247,8 @@ export const EN_PLAIN: Record<string, string> = {
   "安装维护": "Install & maintenance",
   "完整增强": "Full enhancement",
   "官方": "Official",
-  "官方中转站": "Official relay",
+  "国内官网入口": "China website access",
+  "国内官网入口（直连）": "China website (direct)",
   "官方混入 API Key": "Official mixed-in API Key",
   "官方混合 API 不应在 auth.json 中保存 OPENAI_API_KEY。请清理此供应商的 auth.json 后再切换。":
     "Official mixed API should not store OPENAI_API_KEY in auth.json. Clear this provider's auth.json before switching.",
@@ -335,7 +337,9 @@ export const EN_PLAIN: Record<string, string> = {
   "手动": "Manual",
   "手动启动": "Manual launch",
   "打开": "Open",
-  "打开 JOJO Code": "Open JOJO Code",
+  "Codex 国内官网": "Codex China website",
+  "根据所在网络环境选择登录入口，国内用户优先使用直连入口。":
+    "Choose the login endpoint for your network. Users in China should try the direct endpoint first.",
   "打开关于": "Open About",
   "打开链接": "Open link",
   "打开项目主页": "Open project homepage",

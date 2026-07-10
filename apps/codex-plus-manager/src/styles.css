@@ -407,30 +407,30 @@ body {
   letter-spacing: 0;
 }
 
-.jojocode-overview {
+.official-links-overview {
   border-color: hsl(var(--border));
   background: hsl(var(--card));
 }
 
-.light .jojocode-overview {
+.light .official-links-overview {
   background: hsl(var(--card));
 }
 
-.jojocode-overview-layout {
+.official-links-overview-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
 }
 
-.jojocode-overview-main {
+.official-links-overview-main {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
 }
 
-.jojocode-overview-mark {
+.official-links-overview-mark {
   display: grid;
   place-items: center;
   width: 42px;
@@ -441,40 +441,35 @@ body {
   color: hsl(var(--brand-accent));
 }
 
-.jojocode-overview h2 {
+.official-links-overview h2 {
   margin: 2px 0 4px;
   font-size: 20px;
   line-height: 1.25;
 }
 
-.jojocode-overview p {
+.official-links-overview p {
   margin: 0;
   color: hsl(var(--muted-foreground));
   line-height: 1.5;
 }
 
-.jojocode-overview-side {
+.official-links-overview-side {
   display: grid;
   justify-items: end;
   gap: 10px;
 }
 
-.jojocode-model-tags {
+.official-link-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 6px;
-  max-width: 390px;
+  gap: 8px;
 }
 
-.jojocode-model-tags span {
-  border: 1px solid hsl(var(--brand-accent) / 0.28);
-  border-radius: 999px;
-  background: hsl(var(--background) / 0.5);
-  color: hsl(var(--foreground));
+.official-links-overview .official-link-note {
+  max-width: 480px;
   font-size: 12px;
-  line-height: 1;
-  padding: 6px 8px;
+  text-align: right;
 }
 
 .fill {
@@ -2840,8 +2835,21 @@ body {
   .mode-grid.three,
   .relay-grid,
   .zed-remote-settings,
-  .hero-layout {
+  .hero-layout,
+  .official-links-overview-layout {
     grid-template-columns: 1fr;
+  }
+
+  .official-links-overview-side {
+    justify-items: start;
+  }
+
+  .official-link-actions {
+    justify-content: flex-start;
+  }
+
+  .official-links-overview .official-link-note {
+    text-align: left;
   }
 
   .hero-layout .toolbar {

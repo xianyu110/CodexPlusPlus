@@ -2266,34 +2266,36 @@ function OverviewScreen({
   const health = healthItems(overview);
   return (
     <>
-      <Panel className="jojocode-overview">
+      <Panel className="official-links-overview">
         <CardContent>
-          <div className="jojocode-overview-layout">
-            <div className="jojocode-overview-main">
-              <div className="jojocode-overview-mark">
+          <div className="official-links-overview-layout">
+            <div className="official-links-overview-main">
+              <div className="official-links-overview-mark">
                 <Network className="h-5 w-5" />
               </div>
               <div>
-                <span className="eyebrow">{t("官方中转站")}</span>
-                <h2>JOJO Code</h2>
-                <p>
-                  {t("Codex++ 官方中转站，主打稳定接入和划算价格，支持 GPT-5.6 全系列、GPT-5.5、GPT-5.4、Claude Opus 4.8、Claude Opus 4.7、gpt-image-2 等模型与图像能力。")}
-                </p>
+                <span className="eyebrow">{t("国内官网入口")}</span>
+                <h2>{t("Codex 国内官网")}</h2>
+                <p>{t("根据所在网络环境选择登录入口，国内用户优先使用直连入口。")}</p>
               </div>
             </div>
-            <div className="jojocode-overview-side">
-              <div className="jojocode-model-tags">
-                <span>GPT-5.6 全系列</span>
-                <span>GPT-5.5</span>
-                <span>GPT-5.4</span>
-                <span>Opus 4.8</span>
-                <span>Opus 4.7</span>
-                <span>gpt-image-2</span>
+            <div className="official-links-overview-side">
+              <div className="official-link-actions">
+                <Button onClick={() => void actions.openExternalUrl("https://codex.maynor1024.live/login")}>
+                  <ExternalLink className="h-4 w-4" />
+                  {t("国内官网入口（直连）")}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => void actions.openExternalUrl("https://codex.chatgpt-plus.top/login")}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  {t("Cloudflare 入口（适合国外用户）")}
+                </Button>
               </div>
-              <Button onClick={() => void actions.openExternalUrl("https://jojocode.com/")}>
-                <ExternalLink className="h-4 w-4" />
-                {t("打开 JOJO Code")}
-              </Button>
+              <p className="official-link-note">
+                {t("Cloudflare 入口已启用 Cloudflare，国内无法打开时需要使用代理，适合国外用户使用。")}
+              </p>
             </div>
           </div>
         </CardContent>
