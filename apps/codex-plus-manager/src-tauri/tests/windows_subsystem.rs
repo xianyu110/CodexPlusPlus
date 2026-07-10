@@ -309,15 +309,46 @@ fn relay_preview_deduplicates_root_keys_when_merging_common_config() {
 }
 
 #[test]
-fn provider_presets_include_runapi() {
+fn provider_presets_only_include_functional_services() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let presets = manifest_dir.parent().unwrap().join("src/presets.ts");
     let presets = std::fs::read_to_string(&presets).expect("read manager presets.ts");
 
-    assert!(presets.contains("id: \"runapi\""));
-    assert!(presets.contains("name: \"RunAPI\""));
-    assert!(presets.contains("category: \"aggregator\""));
-    assert!(presets.contains("baseUrl: \"https://runapi.co/v1\""));
+    assert_eq!(presets.matches("    id: \"").count(), 13);
+    for expected in [
+        "openai",
+        "deepseek",
+        "zhipu-glm",
+        "kimi",
+        "bailian",
+        "stepfun",
+        "minimax",
+        "volcano-ark",
+        "baidu-qianfan",
+        "xiaomi-mimo",
+        "modelscope",
+        "longcat",
+        "azure",
+    ] {
+        assert!(
+            presets.contains(&format!("id: \"{expected}\"")),
+            "missing functional preset: {expected}"
+        );
+    }
+
+    for forbidden in [
+        "category: \"aggregator\"",
+        "websiteUrl",
+        "apiKeyUrl",
+        "JOJO Code",
+        "RunAPI",
+        "APIKEY.FUN",
+    ] {
+        assert!(
+            !presets.contains(forbidden),
+            "found promotional preset marker: {forbidden}"
+        );
+    }
 }
 
 #[test]

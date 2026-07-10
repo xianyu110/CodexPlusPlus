@@ -466,12 +466,6 @@ body {
   gap: 8px;
 }
 
-.official-links-overview .official-link-note {
-  max-width: 480px;
-  font-size: 12px;
-  text-align: right;
-}
-
 .fill {
   min-height: calc(100vh - 188px);
 }
@@ -2846,10 +2840,6 @@ body {
 
   .official-link-actions {
     justify-content: flex-start;
-  }
-
-  .official-links-overview .official-link-note {
-    text-align: left;
   }
 
   .hero-layout .toolbar {

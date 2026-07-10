@@ -41,7 +41,7 @@ fn bridge_script_defines_expected_globals_and_binding() {
 }
 
 #[test]
-fn injection_script_prefixes_helper_url_without_sponsor_images() {
+fn injection_script_prefixes_helper_url_without_promotional_links() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("window.__CODEX_SESSION_DELETE_HELPER__"));
@@ -49,8 +49,10 @@ fn injection_script_prefixes_helper_url_without_sponsor_images() {
     assert!(!script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_PLUS_VERSION__"));
     assert!(script.contains(codex_plus_core::version::VERSION));
-    assert!(script.contains("https://discord.gg/y96kX7A76v"));
-    assert!(script.contains("data-codex-plus-discord"));
+    assert!(!script.contains("discord.gg"));
+    assert!(!script.contains("data-codex-plus-discord"));
+    assert!(!script.contains("t.me/"));
+    assert!(!script.contains("data-codex-plus-telegram"));
 }
 
 #[test]

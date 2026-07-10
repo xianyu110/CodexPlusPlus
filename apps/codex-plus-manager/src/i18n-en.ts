@@ -16,9 +16,6 @@ export const EN_PLAIN: Record<string, string> = {
   "Codex 意外停止": "Codex stopped unexpectedly",
   "Codex 版本": "Codex version",
   "Codex 目标": "Codex goals",
-  "Cloudflare 入口已启用 Cloudflare，国内无法打开时需要使用代理，适合国外用户使用。":
-    "The Cloudflare endpoint is intended for users outside China. A proxy may be required if it cannot be reached from within China.",
-  "Cloudflare 入口（适合国外用户）": "Cloudflare endpoint (outside China)",
   "Codex++ 导入": "Codex++ import",
   "Codex++ 版本": "Codex++ version",
   "Codex增强": "Codex enhancements",
@@ -73,7 +70,6 @@ export const EN_PLAIN: Record<string, string> = {
   "上游协议": "Upstream protocol",
   "下载并运行安装包": "Download and run installer",
   "不写 API 文件": "Does not write API files",
-  "与 Codex 内插件菜单使用同一个远端广告源": "Uses the same remote ad source as the in-Codex plugin menu",
   "个": "",
   "个会话": " session(s)",
   "中国官方": "China official",
@@ -336,10 +332,8 @@ export const EN_PLAIN: Record<string, string> = {
   "或": " or ",
   "手动": "Manual",
   "手动启动": "Manual launch",
-  "打开": "Open",
   "Codex 国内官网": "Codex China website",
-  "根据所在网络环境选择登录入口，国内用户优先使用直连入口。":
-    "Choose the login endpoint for your network. Users in China should try the direct endpoint first.",
+  "国内用户可通过直连入口访问。": "Users in China can use the direct endpoint.",
   "打开关于": "Open About",
   "打开链接": "Open link",
   "打开项目主页": "Open project homepage",
@@ -538,7 +532,6 @@ export const EN_PLAIN: Record<string, string> = {
   "缺少 Codex++ 静默启动快捷方式时可在安装维护页修复。": "When the Codex++ silent launch shortcut is missing, repair it on the Install & Maintenance page.",
   "缺少管理工具快捷方式时可在安装维护页修复。": "When the manager shortcut is missing, repair it on the Install & Maintenance page.",
   "聚合": "Aggregate",
-  "聚合/中转": "Aggregate/relay",
   "聚合供应商": "Aggregate provider",
   "聚合供应商会在真实对话中轮转成员，请测试成员供应商": "Aggregate providers rotate members in real conversations; test the member providers instead",
   "聚合供应商只保存成员和策略配置，成员来自已有 API 供应商；切为当前后会通过本地协议代理轮转请求。":
@@ -651,7 +644,6 @@ export const EN_TEMPLATE: Record<string, string> = {
   "{0} 个市场脚本，已安装 {1} 个，本地整体 {2}": "{0} marketplace script(s), {1} installed, local overall {2}",
   "{0} 个项目": "{0} project(s)",
   "{0} 副本": "{0} copy",
-  "{0} 条": "{0} item(s)",
   "供应商 {0}": "Provider {0}",
   "供应商「{0}」缺少独立 config.toml，已停止切换，避免继续显示上一套配置文件。请先在该供应商详情里保存 config.toml。":
     "Provider “{0}” is missing its own config.toml, so the switch was stopped to avoid showing the previous config files. Save config.toml in this provider's details first.",

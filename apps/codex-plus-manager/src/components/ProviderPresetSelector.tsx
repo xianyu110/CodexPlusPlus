@@ -29,7 +29,6 @@ export type PresetPatch = Partial<RelayProfile>;
 const categoryLabels: Record<string, string> = {
   official: t("官方"),
   cn_official: t("中国官方"),
-  aggregator: t("聚合/中转"),
   third_party: t("第三方"),
 };
 
@@ -161,7 +160,7 @@ function PresetButton({
     <button
       className="preset-btn"
       onClick={() => onSelect(preset)}
-      title={`${preset.websiteUrl ?? ""}\n${preset.baseUrl}`}
+      title={preset.baseUrl}
       type="button"
     >
       <span className="preset-btn-icon">{initialFor(preset.name)}</span>

@@ -2276,7 +2276,7 @@ function OverviewScreen({
               <div>
                 <span className="eyebrow">{t("国内官网入口")}</span>
                 <h2>{t("Codex 国内官网")}</h2>
-                <p>{t("根据所在网络环境选择登录入口，国内用户优先使用直连入口。")}</p>
+                <p>{t("国内用户可通过直连入口访问。")}</p>
               </div>
             </div>
             <div className="official-links-overview-side">
@@ -2285,17 +2285,7 @@ function OverviewScreen({
                   <ExternalLink className="h-4 w-4" />
                   {t("国内官网入口（直连）")}
                 </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => void actions.openExternalUrl("https://codex.chatgpt-plus.top/login")}
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  {t("Cloudflare 入口（适合国外用户）")}
-                </Button>
               </div>
-              <p className="official-link-note">
-                {t("Cloudflare 入口已启用 Cloudflare，国内无法打开时需要使用代理，适合国外用户使用。")}
-              </p>
             </div>
           </div>
         </CardContent>
