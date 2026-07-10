@@ -11,7 +11,7 @@ members = [
 version = "1.2.34"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/BigPizzaV3/CodexPlusPlus"
+repository = "https://github.com/xianyu110/CodexPlusPlus"
 
 [workspace.dependencies]
 aes-gcm = "0.10"
