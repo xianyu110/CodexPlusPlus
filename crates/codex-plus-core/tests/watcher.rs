@@ -105,6 +105,10 @@ fn codex_process_filter_keeps_chatgpt_desktop_package_processes() {
             24,
             r"C:\Program Files\WindowsApps\Other.ChatGPT_1.0.0.0_x64__abc\app\ChatGPT.exe",
         ),
+        (
+            25,
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop\app\ChatGPT.exe",
+        ),
     ];
 
     assert_eq!(codex_process_ids(processes), vec![21, 22]);
