@@ -25,7 +25,7 @@ pub fn run() {
         return;
     };
     let show_update = commands::startup_should_show_update();
-    let run_result = tauri::Builder::default()
+    let app_result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let url = if show_update {
@@ -114,14 +114,26 @@ pub fn run() {
             manager_hide_to_tray,
             update_tray_labels
         ])
-        .run(tauri::generate_context!());
-    if let Err(error) = run_result {
-        let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
-            "manager.run_failed",
-            serde_json::json!({
-                "error": error.to_string()
-            }),
-        );
+        .build(tauri::generate_context!());
+    match app_result {
+        Ok(app) => app.run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+            } = event
+                && should_restore_window_on_reopen(has_visible_windows)
+            {
+                show_main_window(app_handle);
+            }
+        }),
+        Err(error) => {
+            let _ = codex_plus_core::diagnostic_log::append_diagnostic_log(
+                "manager.run_failed",
+                serde_json::json!({
+                    "error": error.to_string()
+                }),
+            );
+        }
     }
 }
 
@@ -226,6 +238,19 @@ fn show_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn should_restore_window_on_reopen(has_visible_windows: bool) -> bool {
+    !has_visible_windows
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn macos_reopen_only_restores_when_no_window_is_visible() {
+        assert!(super::should_restore_window_on_reopen(false));
+        assert!(!super::should_restore_window_on_reopen(true));
     }
 }
 
