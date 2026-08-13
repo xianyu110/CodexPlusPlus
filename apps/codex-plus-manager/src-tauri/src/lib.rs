@@ -120,6 +120,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
+                ..
             } = event
                 && should_restore_window_on_reopen(has_visible_windows)
             {
