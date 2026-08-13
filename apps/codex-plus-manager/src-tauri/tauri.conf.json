@@ -22,7 +22,13 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/.codex-session-delete/dream-skin/**"
+        ]
+      }
     }
   },
   "bundle": {
