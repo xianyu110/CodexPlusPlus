@@ -760,8 +760,8 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         &self,
         payload: Value,
     ) -> anyhow::Result<Value> {
-        self.user_scripts
-            .inventory_with_runtime_status(payload.get("runtime_status"))
+        let _ = payload;
+        self.user_scripts.inventory()
     }
 
     async fn set_user_scripts_enabled(&self, enabled: bool) -> anyhow::Result<Value> {

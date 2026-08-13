@@ -9,18 +9,6 @@ const RENDERER_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inje
 const STEPWISE_SCRIPT: &str = include_str!("../../../assets/inject/stepwise-inject.js");
 pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260518-1";
 
-static EMPTY_DREAM_SKIN_IMAGE: &[u8] = &[];
-
-pub fn dream_skin_default_image() -> (&'static str, &'static [u8]) {
-    ("application/octet-stream", EMPTY_DREAM_SKIN_IMAGE)
-}
-
-pub fn pet_real_mouse_script() -> &'static str { "" }
-pub fn pet_real_mouse_capability_probe_script() -> String { "false".to_string() }
-pub fn pet_real_mouse_update_script(_x: i32, _y: i32) -> String { String::new() }
-pub fn pet_real_mouse_stop_script() -> &'static str { "" }
-pub fn hide_official_usage_alert_config(_settings: &BackendSettings) -> bool { false }
-
 pub fn renderer_script() -> &'static str {
     RENDERER_SCRIPT
 }
