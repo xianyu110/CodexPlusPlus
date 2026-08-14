@@ -2022,6 +2022,8 @@ experimental_bearer_token = "sk-new"
     assert!(config.contains(r#"wire_api = "responses""#));
     assert!(config.contains("requires_openai_auth = true"));
     assert!(config.contains(r#"base_url = "https://relay.example/v1""#));
+    assert!(config.contains("[features]"));
+    assert!(config.contains("image_generation = true"));
     assert!(!config.contains("experimental_bearer_token"));
     assert!(!config.contains("live_provider"));
     assert!(!config.contains("https://live.example/v1"));
@@ -2057,6 +2059,8 @@ requires_openai_auth = true
     assert!(config.contains("[model_providers.max_ai]"));
     assert!(config.contains(r#"name = "max_ai""#));
     assert!(config.contains(r#"base_url = "https://codex.chatgpt-plus.top/v1""#));
+    assert!(config.contains("[features]"));
+    assert!(config.contains("image_generation = true"));
     assert!(!config.contains("experimental_bearer_token"));
     assert!(!config.contains("[model_providers.custom]"));
 }

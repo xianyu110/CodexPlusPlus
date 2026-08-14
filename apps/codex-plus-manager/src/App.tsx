@@ -4483,6 +4483,9 @@ function buildRelayConfigToml(
     `base_url = "${tomlString(baseUrl)}"`,
     options.includeBearerToken && apiKey ? `experimental_bearer_token = "${tomlString(apiKey)}"` : null,
     "",
+    "[features]",
+    "image_generation = true",
+    "",
   ].filter((line): line is string => line !== null).join("\n");
 }
 

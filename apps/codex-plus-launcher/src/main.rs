@@ -80,9 +80,7 @@ fn acquire_single_instance_guard_with_retry(
 }
 
 fn try_acquire_single_instance_guard() -> std::io::Result<std::net::TcpListener> {
-    codex_plus_core::ports::acquire_loopback_port_guard(
-        codex_plus_core::ports::LAUNCHER_GUARD_PORT,
-    )
+    codex_plus_core::ports::acquire_loopback_port_guard(codex_plus_core::ports::LAUNCHER_GUARD_PORT)
 }
 
 fn should_recover_stale_launcher(debug_port: u16) -> bool {
@@ -107,7 +105,12 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
     let settings = hooks.load_settings().await?;
     let app_dir = hooks.resolve_app_dir(options.app_dir.as_deref(), &settings)?;
     let launch_result = hooks
-        .launch_codex(&app_dir, options.debug_port, &settings.codex_extra_args)
+        .launch_codex(
+            &app_dir,
+            options.debug_port,
+            &settings.codex_extra_args,
+            &codex_plus_core::launcher::codex_launch_env_overrides(&settings),
+        )
         .await;
     if settings.enhancements_enabled {
         hooks.start_helper(options.helper_port).await?;
@@ -270,9 +273,10 @@ impl LaunchHooks for LauncherHooks {
         app_dir: &Path,
         debug_port: u16,
         extra_args: &[String],
+        env_overrides: &[(String, String)],
     ) -> anyhow::Result<codex_plus_core::launcher::CodexLaunch> {
         self.core
-            .launch_codex(app_dir, debug_port, extra_args)
+            .launch_codex(app_dir, debug_port, extra_args, env_overrides)
             .await
     }
 
@@ -741,7 +745,10 @@ mod tests {
             "async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<()> {\n    let hooks = LauncherHooks::default();"
         ));
         assert!(source.contains("hooks.start_helper(options.helper_port).await?"));
-        assert!(source.contains("hooks.ensure_injection(options.debug_port, options.helper_port).await"));
+        assert!(
+            source
+                .contains("hooks.ensure_injection(options.debug_port, options.helper_port).await")
+        );
         assert!(source.contains("injection_ready"));
     }
 

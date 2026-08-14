@@ -9,7 +9,8 @@ use codex_plus_core::app_paths::{
 use codex_plus_core::launcher::{
     CodexLaunch, DefaultLaunchHooks, LaunchHooks, LaunchOptions, MacosCleanupPolicy,
     build_codex_arguments, build_codex_command, build_macos_cleanup_command,
-    build_macos_open_command, build_packaged_activation, launch_and_inject_with_hooks,
+    build_macos_open_command, build_packaged_activation, codex_launch_env_overrides,
+    launch_and_inject_with_hooks,
 };
 #[cfg(windows)]
 use codex_plus_core::launcher::{WindowsProcessControlStrategy, windows_process_control_strategy};
@@ -630,6 +631,66 @@ async fn launch_lifecycle_skips_active_relay_profile_when_supplier_config_disabl
     assert!(events.contains(&"launch:9229".to_string()));
 }
 
+#[test]
+fn codex_launch_env_overrides_uses_active_relay_profile_api_key() {
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "relay-a".to_string(),
+            api_key: "sk-test".to_string(),
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "relay-a".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let overrides = codex_launch_env_overrides(&settings);
+
+    assert_eq!(
+        overrides,
+        vec![("OPENAI_API_KEY".to_string(), "sk-test".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn launch_lifecycle_passes_openai_api_key_to_codex_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("Codex.app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    let status_store = StatusStore::new(temp.path().join("latest-status.json"));
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hooks = FakeHooks::new(events.clone())
+        .with_launch_env_capture()
+        .with_settings(BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "relay-a".to_string(),
+                api_key: "sk-test".to_string(),
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "relay-a".to_string(),
+            ..BackendSettings::default()
+        });
+
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(app_dir),
+            debug_port: 9229,
+            helper_port: 57321,
+            status_store,
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+    handle.wait_for_codex_exit().await.unwrap();
+
+    let events = events.lock().unwrap().clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event == "launch-env:OPENAI_API_KEY=sk-test")
+    );
+}
+
 #[tokio::test]
 async fn launch_lifecycle_tolerates_duplicate_context_parent_tables_before_applying_relay() {
     let temp = tempfile::tempdir().unwrap();
@@ -967,6 +1028,7 @@ struct FakeHooks {
     launch_error: Option<String>,
     inject_error: Option<String>,
     provider_sync_unsupported: bool,
+    capture_launch_env: bool,
 }
 
 impl FakeHooks {
@@ -982,6 +1044,7 @@ impl FakeHooks {
             launch_error: None,
             inject_error: None,
             provider_sync_unsupported: false,
+            capture_launch_env: false,
         }
     }
 
@@ -1007,6 +1070,11 @@ impl FakeHooks {
 
     fn with_provider_sync_unsupported(mut self) -> Self {
         self.provider_sync_unsupported = true;
+        self
+    }
+
+    fn with_launch_env_capture(mut self) -> Self {
+        self.capture_launch_env = true;
         self
     }
 
@@ -1065,8 +1133,17 @@ impl LaunchHooks for FakeHooks {
         app_dir: &Path,
         debug_port: u16,
         extra_args: &[String],
+        env_overrides: &[(String, String)],
     ) -> anyhow::Result<CodexLaunch> {
         assert!(app_dir.ends_with("Codex.app"));
+        if self.capture_launch_env {
+            let formatted = env_overrides
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.event(format!("launch-env:{formatted}"));
+        }
         if extra_args.is_empty() {
             self.event(format!("launch:{debug_port}"));
         } else {

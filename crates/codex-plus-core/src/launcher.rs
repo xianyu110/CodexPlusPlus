@@ -79,6 +79,50 @@ impl Default for LaunchOptions {
     }
 }
 
+pub fn codex_launch_env_overrides(settings: &BackendSettings) -> Vec<(String, String)> {
+    let api_key = settings.active_relay_profile().api_key.trim();
+    if api_key.is_empty() {
+        Vec::new()
+    } else {
+        vec![("OPENAI_API_KEY".to_string(), api_key.to_string())]
+    }
+}
+
+async fn apply_macos_launch_env_overrides(
+    env_overrides: &[(String, String)],
+) -> anyhow::Result<()> {
+    let _ = env_overrides;
+    #[cfg(target_os = "macos")]
+    {
+        if env_overrides.is_empty() {
+            let status = Command::new("/bin/launchctl")
+                .arg("unsetenv")
+                .arg("OPENAI_API_KEY")
+                .status()
+                .await
+                .context("failed to clear OPENAI_API_KEY from macOS launchd")?;
+            if !status.success() {
+                anyhow::bail!("launchctl unsetenv OPENAI_API_KEY failed");
+            }
+            return Ok(());
+        }
+
+        for (key, value) in env_overrides {
+            let status = Command::new("/bin/launchctl")
+                .arg("setenv")
+                .arg(key)
+                .arg(value)
+                .status()
+                .await
+                .with_context(|| format!("failed to set macOS launchd env {key}"))?;
+            if !status.success() {
+                anyhow::bail!("launchctl setenv {key} failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct LaunchHandle {
     pub debug_port: u16,
@@ -133,6 +177,7 @@ pub trait LaunchHooks: Send + Sync {
         app_dir: &Path,
         debug_port: u16,
         extra_args: &[String],
+        env_overrides: &[(String, String)],
     ) -> anyhow::Result<CodexLaunch>;
     async fn bridge_context(
         &self,
@@ -240,14 +285,21 @@ where
         }
 
         let launch = hooks
-            .launch_codex(&app_dir, debug_port, &settings.codex_extra_args)
+            .launch_codex(
+                &app_dir,
+                debug_port,
+                &settings.codex_extra_args,
+                &codex_launch_env_overrides(&settings),
+            )
             .await?;
         launched = Some(launch.clone());
         keep_launched_on_error = true;
 
         let mut injection_degraded = false;
         if settings.enhancements_enabled {
-            let injection_ready = hooks.ensure_injection(debug_port, helper_port, &app_dir).await;
+            let injection_ready = hooks
+                .ensure_injection(debug_port, helper_port, &app_dir)
+                .await;
             if injection_ready {
                 keep_launched_on_error = false;
                 hooks.start_bridge_watchdog(debug_port, helper_port).await?;
@@ -447,6 +499,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         app_dir: &Path,
         debug_port: u16,
         extra_args: &[String],
+        env_overrides: &[(String, String)],
     ) -> anyhow::Result<CodexLaunch> {
         if cfg!(windows) {
             if let Some(activation) = build_packaged_activation(app_dir, debug_port, extra_args) {
@@ -484,10 +537,12 @@ impl LaunchHooks for DefaultLaunchHooks {
             let executable = command
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("macOS open command is empty"))?;
+            apply_macos_launch_env_overrides(env_overrides).await?;
             let child = Command::new(executable)
                 .args(&command[1..])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .envs(env_overrides.iter().map(|(key, value)| (key, value)))
                 .spawn()
                 .context("failed to launch macOS Codex app")?;
             *self.child.lock().await = Some(child);
@@ -507,6 +562,8 @@ impl LaunchHooks for DefaultLaunchHooks {
             .args(&command[1..])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        apply_macos_launch_env_overrides(env_overrides).await?;
+        child_command.envs(env_overrides.iter().map(|(key, value)| (key, value)));
         #[cfg(windows)]
         child_command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
         let child = child_command

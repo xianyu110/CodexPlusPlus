@@ -1555,10 +1555,17 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     } else if !api_key.trim().is_empty() {
         provider["experimental_bearer_token"] = toml_edit::value(api_key.trim());
     }
+    enable_codex_image_generation_feature_in_doc(&mut doc)?;
 
     Ok(move_model_providers_before_profiles(
         &ensure_trailing_newline(doc.to_string()),
     ))
+}
+
+fn enable_codex_image_generation_feature_in_doc(doc: &mut DocumentMut) -> anyhow::Result<()> {
+    let features = table_mut_or_insert(doc, "features")?;
+    features["image_generation"] = toml_edit::value(true);
+    Ok(())
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
@@ -1994,6 +2001,7 @@ fn upsert_model_provider_config(
     provider["requires_openai_auth"] = toml_edit::value(true);
     provider["base_url"] = toml_edit::value(base_url);
     provider["experimental_bearer_token"] = toml_edit::value(bearer_token);
+    enable_codex_image_generation_feature_in_doc(&mut doc)?;
 
     Ok(move_model_providers_before_profiles(
         &ensure_trailing_newline(doc.to_string()),
