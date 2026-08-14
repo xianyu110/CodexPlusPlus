@@ -80,7 +80,8 @@ impl Default for LaunchOptions {
 }
 
 pub fn codex_launch_env_overrides(settings: &BackendSettings) -> Vec<(String, String)> {
-    let api_key = settings.active_relay_profile().api_key.trim();
+    let profile = settings.active_relay_profile();
+    let api_key = profile.api_key.trim();
     if api_key.is_empty() {
         Vec::new()
     } else {
