@@ -2281,7 +2281,7 @@ function OverviewScreen({
             </div>
             <div className="official-links-overview-side">
               <div className="official-link-actions">
-                <Button onClick={() => void actions.openExternalUrl("https://codex.maynor1024.live/login")}>
+                <Button onClick={() => void actions.openExternalUrl("https://momoai.asia/login")}>
                   <ExternalLink className="h-4 w-4" />
                   {t("国内官网入口（直连）")}
                 </Button>
