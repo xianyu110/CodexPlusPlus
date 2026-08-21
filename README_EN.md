@@ -37,7 +37,7 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 
 Users in China can use the direct login entry:
 
-- [China official website (direct)](https://codex.maynor1024.live/login)
+- [China official website (direct)](https://momoai.asia/login)
 
 ## Highlights
 
