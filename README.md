@@ -37,7 +37,7 @@ Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安�
 
 国内用户可通过直连入口访问：
 
-- [国内官网入口（直连）](https://codex.maynor1024.live/login)
+- [国内官网入口（直连）](https://momoai.asia/login)
 
 ## 主要功能
 
