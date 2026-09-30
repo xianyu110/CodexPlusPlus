@@ -30,8 +30,8 @@ use windows::Win32::System::Registry::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
-    TerminateProcess,
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
@@ -343,6 +343,36 @@ pub fn terminate_process(process_id: u32) -> bool {
     }
     let _guard = HandleGuard(handle);
     unsafe { TerminateProcess(handle, 0) }.is_ok()
+}
+
+/// Return the process creation time as a stable identity for the current PID.
+/// Windows FILETIME values are monotonic enough for distinguishing PID reuse.
+#[cfg(windows)]
+pub fn process_birth_id(process_id: u32) -> Option<u64> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()? };
+    if handle.is_invalid() {
+        return None;
+    }
+    let _guard = HandleGuard(handle);
+    let mut creation = windows::Win32::Foundation::FILETIME::default();
+    let mut exit = windows::Win32::Foundation::FILETIME::default();
+    let mut kernel = windows::Win32::Foundation::FILETIME::default();
+    let mut user = windows::Win32::Foundation::FILETIME::default();
+    unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }
+        .ok()
+        .map(|_| filetime_to_u64(&creation))
+}
+
+#[cfg(windows)]
+pub fn process_started_at_secs_from_birth_id(birth_id: u64) -> Option<u64> {
+    const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+    let seconds = birth_id / 10_000_000;
+    seconds.checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)
+}
+
+#[cfg(windows)]
+fn filetime_to_u64(filetime: &windows::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(filetime.dwHighDateTime) << 32) | u64::from(filetime.dwLowDateTime)
 }
 
 #[cfg(windows)]
