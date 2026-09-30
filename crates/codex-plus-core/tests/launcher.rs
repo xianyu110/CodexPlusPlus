@@ -14,7 +14,7 @@ use codex_plus_core::launcher::{
     build_codex_command_with_native_menu_inspector, build_macos_cleanup_command,
     build_macos_open_command, build_macos_open_command_with_native_menu_inspector,
     build_packaged_activation, build_packaged_activation_with_native_menu_inspector,
-    launch_and_inject_with_hooks,
+    codex_launch_env_overrides, launch_and_inject_with_hooks,
 };
 #[cfg(windows)]
 use codex_plus_core::launcher::{WindowsProcessControlStrategy, windows_process_control_strategy};
@@ -240,6 +240,23 @@ fn app_paths_build_macos_bundle_executable() {
     assert_eq!(
         build_codex_executable(&app),
         PathBuf::from("/Applications/OpenAI Codex.app/Contents/MacOS/Codex")
+    );
+}
+
+#[test]
+fn launcher_env_overrides_include_openai_api_key_for_active_relay_profile() {
+    let mut settings = BackendSettings::default();
+    settings.relay_profiles = vec![RelayProfile {
+        relay_mode: codex_plus_core::settings::RelayMode::PureApi,
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-test"}"#.to_string(),
+        ..RelayProfile::default()
+    }];
+
+    let env = codex_launch_env_overrides(&settings);
+
+    assert_eq!(
+        env,
+        vec![("OPENAI_API_KEY".to_string(), "sk-test".to_string())]
     );
 }
 

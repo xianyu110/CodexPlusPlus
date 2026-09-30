@@ -520,6 +520,47 @@ fn apply_pure_api_config_switches_auth_json_and_writes_provider_token() {
 }
 
 #[test]
+fn normalize_relay_profile_migrates_decommissioned_china_relay_urls() {
+    let mut profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        base_url: "https://codex.chatgpt-plus.top".to_string(),
+        upstream_base_url: "https://codex2.chatgpt-plus.top/".to_string(),
+        config_contents: "[model_providers.custom]\nbase_url = \"https://codex3.chatgpt-plus.top\"\n"
+            .to_string(),
+        ..RelayProfile::default()
+    };
+
+    normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+    assert_eq!(profile.base_url, "https://momoai.asia/v1");
+    assert_eq!(profile.upstream_base_url, "https://momoai.asia/v1");
+    assert!(profile
+        .config_contents
+        .contains("base_url = \"https://momoai.asia/v1\""));
+}
+
+#[test]
+fn apply_relay_profile_writes_image_generation_feature_for_custom_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        protocol: RelayProtocol::Responses,
+        model: "gpt-5.4".to_string(),
+        base_url: "https://relay.example/v1".to_string(),
+        api_key: "sk-test-redacted".to_string(),
+        config_contents: String::new(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-test-redacted"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("[features]"));
+    assert!(config.contains("image_generation = true"));
+}
+
+#[test]
 fn apply_relay_files_switches_complete_config_and_auth_json() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("config.toml"), r#"model = "old""#).unwrap();

@@ -19,12 +19,62 @@ use tokio::sync::Mutex;
 use crate::settings::{BackendSettings, SettingsStore, normalize_codex_extra_args};
 use crate::status::{LaunchStatus, StatusStore};
 
-#[cfg(windows)]
-const POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS: &[u64] = &[0, 5, 15, 30, 60, 120, 180, 240, 300];
-#[cfg_attr(not(windows), allow(dead_code))]
-const POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
 static PET_OVERLAY_SYNC_FAILED: AtomicBool = AtomicBool::new(false);
 static PET_CURSOR_DRIVER_FAILED: AtomicBool = AtomicBool::new(false);
+const BRIDGE_HEALTH_FAILURE_THRESHOLD: u8 = 2;
+/// 重注入退避：首次重注入立即执行，此后若桥仍不健康，重注入间隔按
+/// 10s → 20s → 40s … 指数增长并封顶。对重注入修不好的失效（如应用更新
+/// 改变了页面上下文），避免每 10~15 秒重发一次完整注入脚本（issue #2169）。
+const BRIDGE_REINJECT_BACKOFF_BASE_SECS: u64 = 10;
+const BRIDGE_REINJECT_BACKOFF_CAP_SECS: u64 = 300;
+
+/// 看门狗内跟踪重注入退避状态；健康恢复或应用实例更换时重置。
+#[derive(Debug, Default)]
+struct BridgeReinjectBackoff {
+    consecutive_attempts: u32,
+    next_allowed_at: Option<std::time::Instant>,
+}
+
+fn reinject_backoff_delay(consecutive_attempts: u32) -> std::time::Duration {
+    let factor = 1u64
+        .checked_shl(consecutive_attempts.min(u64::BITS - 1))
+        .unwrap_or(u64::MAX);
+    std::time::Duration::from_secs(
+        BRIDGE_REINJECT_BACKOFF_BASE_SECS
+            .saturating_mul(factor)
+            .min(BRIDGE_REINJECT_BACKOFF_CAP_SECS),
+    )
+}
+
+impl BridgeReinjectBackoff {
+    fn ready(&self, now: std::time::Instant) -> bool {
+        self.next_allowed_at.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn record_attempt(&mut self, now: std::time::Instant) {
+        let delay = reinject_backoff_delay(self.consecutive_attempts);
+        self.next_allowed_at = Some(now + delay);
+        self.consecutive_attempts = self.consecutive_attempts.saturating_add(1);
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_attempts = 0;
+        self.next_allowed_at = None;
+    }
+}
+const MACOS_DEBUG_TAKEOVER_WAIT_MS: u64 = 5_000;
+const MACOS_DEBUG_TAKEOVER_INTERVAL_MS: u64 = 100;
+
+/// 协议代理的端口写死在 `config.toml` 的 `base_url = "http://127.0.0.1:57321/v1"` 里，
+/// 不能像普通 helper 端口那样临时换一个空闲的，否则 Codex CLI 会连到没人监听的地址。
+/// 而管理器的「重启」是先强杀旧 launcher 再拉新的，旧 helper 交还监听要一小会儿；
+/// 过去这里一次 bind 失败就整个启动中止，用户侧就是重启必失败、直接双击 exe 反而正常（issue #1933）。
+/// 所以固定端口下给前任一个让位的窗口。端口被占用，以及 Windows 在旧进程
+/// 退出瞬间暂时返回的 10013，都放在这一段里重试。窗口结束仍是 10013，
+/// 才当成端口被系统永久保留。
+const HELPER_BIND_RETRY_TIMEOUT_MS: u64 = 6_000;
+const PROTOCOL_PROXY_BIND_RETRY_TIMEOUT_MS: u64 = 10_000;
+const HELPER_BIND_RETRY_INTERVAL_MS: u64 = 200;
 
 /// Asynchronous callback used by the bridge watchdog to restore a launcher-specific bridge.
 ///
@@ -57,6 +107,13 @@ pub enum ProcessWaitStrategy {
 pub enum MacosCleanupPolicy {
     QuitIfNotPreviouslyRunning,
     SkipQuitBecauseAlreadyRunning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacosDebugLaunchAction {
+    LaunchNew,
+    ReuseRunningDebugApp,
+    RestartRunningApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +187,7 @@ impl LaunchHandle {
         if self.helper_started {
             self.hooks.shutdown_helper(self.helper_port).await;
         }
+        self.hooks.stop_native_browser_compatibility().await;
         result
     }
 }
@@ -144,6 +202,11 @@ pub trait LaunchHooks: Send + Sync {
     fn select_debug_port(&self, requested: u16) -> u16;
     fn select_helper_port(&self, requested: u16) -> u16;
     async fn load_settings(&self) -> anyhow::Result<BackendSettings>;
+    async fn start_native_browser_compatibility(&self, _settings: &BackendSettings) {}
+    async fn stop_native_browser_compatibility(&self) {}
+    fn cleanup_unsupported_config(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn run_provider_sync(&self) -> anyhow::Result<()>;
     fn has_pending_remote_control_session_recoveries(&self) -> bool {
         false
@@ -155,7 +218,16 @@ pub trait LaunchHooks: Send + Sync {
     async fn apply_active_relay_profile(&self, _settings: &BackendSettings) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn ensure_computer_use_config(&self, _settings: &BackendSettings) -> anyhow::Result<()> {
+    async fn ensure_active_protocol_proxy_config(
+        &self,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn ensure_computer_use_config(
+        &self,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
     async fn ensure_plugin_marketplace_config(
@@ -242,8 +314,6 @@ pub struct DefaultLaunchHooks {
     helper: Mutex<Option<HelperRuntime>>,
     bridge_watchdog: Mutex<Option<BridgeWatchdogRuntime>>,
     bridge_reinjector: Mutex<Option<BridgeReinjector>>,
-    computer_use_guard_watchdog: Mutex<Option<ComputerUseGuardWatchdogRuntime>>,
-    computer_use_guard_artifacts: Mutex<Option<crate::computer_use_guard::GuardArtifacts>>,
 }
 
 struct HelperRuntime {
@@ -256,13 +326,173 @@ struct BridgeWatchdogRuntime {
     task: tokio::task::JoinHandle<()>,
 }
 
-struct ComputerUseGuardWatchdogRuntime {
-    shutdown: tokio::sync::oneshot::Sender<()>,
-    task: tokio::task::JoinHandle<()>,
-}
-
 pub async fn launch_and_inject(options: LaunchOptions) -> anyhow::Result<LaunchHandle> {
     launch_and_inject_with_hooks(options, DefaultLaunchHooks::shared()).await
+}
+
+/// 判断错误链里是不是「端口已被占用」。只有这一种失败值得等前任让位重试，
+/// 其余（权限不足、地址非法等）重试多少次都一样，直接冒泡更快也更好排查。
+fn error_is_address_in_use(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::AddrInUse)
+    })
+}
+
+/// 判断错误链里是不是「端口被系统禁止绑定」（issue #2189）。
+/// Windows 上 Hyper-V/WSL 会在开机时把动态端口范围（49152-65535）里的一段段端口
+/// 划进排除区间，落在区间里的端口 bind 报 os error 10013（PermissionDenied），
+/// 和「被进程占用」不是一回事。真正被排除区间划走时重试不会成功，
+/// 但重启瞬间旧套接字未放开也会暂时返回同一个错误，所以只有固定端口会在
+/// 有限窗口内重试，窗口结束后仍失败才给出对症指引。
+fn error_is_bind_forbidden(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(crate::ports::port_bind_forbidden)
+    })
+}
+
+/// 把 helper 端口 bind 失败翻译成用户能照着处理的提示。
+///
+/// 过去只有「端口被占用」会追加中文说明（issue #1933 的重试逻辑），
+/// Windows 保留端口区间（os error 10013）直接裸抛英文 bind 报错，
+/// 用户既看不懂也不知道为什么混入 Responses key 之后就再也起不来。
+fn describe_helper_bind_failure(
+    error: anyhow::Error,
+    helper_port: u16,
+    protocol_proxy_enabled: bool,
+    bind_retry_timeout_ms: u64,
+) -> anyhow::Error {
+    if protocol_proxy_enabled && error_is_address_in_use(&error) {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "helper.bind_gave_up_on_busy_port",
+            serde_json::json!({
+                "helper_port": helper_port,
+                "waited_ms": bind_retry_timeout_ms,
+            }),
+        );
+        return error.context(format!(
+            "协议代理端口 {helper_port} 被其他进程占用，等待 {} 秒后仍未释放。\
+             该端口写在 config.toml 的 base_url 里，不能自动改用其他端口；\
+             请退出仍在运行的 Codex++ 或占用该端口的程序后重试。",
+            bind_retry_timeout_ms / 1000
+        ));
+    }
+    if error_is_bind_forbidden(&error) {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "helper.bind_forbidden_port",
+            serde_json::json!({ "helper_port": helper_port }),
+        );
+        if cfg!(windows) {
+            return error.context(format!(
+                "helper 端口 {helper_port} 被 Windows 保留，无法绑定\
+                 （os error 10013，常见于 Hyper-V/WSL 开机划走的动态端口排除区间）。\
+                 请以管理员运行 netsh interface ipv4 show excludedportrange protocol=tcp \
+                 确认该端口是否在排除区间内，重启电脑通常可重新分配；\
+                 协议代理模式下也可以设置环境变量 CODEX_PLUS_PROTOCOL_PROXY_PORT \
+                 换一个端口后重试。"
+            ));
+        }
+        return error.context(format!(
+            "helper 端口 {helper_port} 绑定被系统拒绝，请检查端口占用与权限。"
+        ));
+    }
+    error
+}
+
+/// 按 `interval_ms` 重试启动 helper，直到成功或超过 `timeout_ms`。
+/// 端口被占用会重试；`retry_forbidden` 为真时，暂时的 10013 也放在同一段等待里。
+async fn start_helper_waiting_for_busy_port<F, Fut>(
+    mut start: F,
+    timeout_ms: u64,
+    interval_ms: u64,
+    retry_forbidden: bool,
+) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let mut waited_ms = 0;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let error = match start().await {
+            Ok(()) => {
+                if attempts > 1 {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "helper.bind_recovered_after_busy_port",
+                        serde_json::json!({
+                            "attempts": attempts,
+                            "waited_ms": waited_ms,
+                        }),
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let retryable = error_is_address_in_use(&error)
+            || (retry_forbidden && error_is_bind_forbidden(&error));
+        if !retryable || waited_ms >= timeout_ms {
+            return Err(error);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+        waited_ms += interval_ms;
+    }
+}
+
+fn helper_bind_retry_timeout_ms(protocol_proxy_enabled: bool, is_macos: bool) -> u64 {
+    if protocol_proxy_enabled {
+        PROTOCOL_PROXY_BIND_RETRY_TIMEOUT_MS
+    } else if is_macos {
+        HELPER_BIND_RETRY_TIMEOUT_MS
+    } else {
+        0
+    }
+}
+
+pub fn protocol_proxy_bind_retry_timeout_ms() -> u64 {
+    PROTOCOL_PROXY_BIND_RETRY_TIMEOUT_MS
+}
+
+pub fn helper_bind_retry_interval_ms() -> u64 {
+    HELPER_BIND_RETRY_INTERVAL_MS
+}
+
+/// 这次启动如果必须占用写进 `config.toml` 的协议代理端口，返回那个端口。
+/// 不需要协议代理时返回 `None`，调用方不应去等一个用不到的端口。
+pub fn required_fixed_helper_port(settings: &BackendSettings) -> Option<u16> {
+    let enabled = relay_protocol_proxy_enabled(settings)
+        || remote_control_provider_proxy_enabled(settings);
+    enabled.then(crate::protocol_proxy::protocol_proxy_port)
+}
+
+/// 在拉起新 launcher 之前确认固定端口已经能绑定。
+/// `probe` 成功表示端口已释放；占用和暂时的 10013 都继续等，其它错误立即返回。
+pub fn wait_for_fixed_helper_port(
+    port: u16,
+    timeout_ms: u64,
+    interval_ms: u64,
+    mut probe: impl FnMut(u16) -> std::io::Result<()>,
+    mut sleep: impl FnMut(u64),
+) -> anyhow::Result<()> {
+    let mut waited_ms = 0u64;
+    loop {
+        match probe(port) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let error = anyhow::Error::from(error);
+                let retryable = error_is_address_in_use(&error) || error_is_bind_forbidden(&error);
+                if !retryable || waited_ms >= timeout_ms {
+                    return Err(describe_helper_bind_failure(error, port, true, timeout_ms));
+                }
+                sleep(interval_ms);
+                waited_ms = waited_ms.saturating_add(interval_ms);
+            }
+        }
+    }
 }
 
 pub async fn launch_and_inject_with_hooks<H>(
@@ -283,7 +513,10 @@ where
     let mut keep_launched_on_error = false;
 
     let result: anyhow::Result<LaunchHandle> = async {
+        hooks.start_native_browser_compatibility(&settings).await;
         let home = crate::relay_config::default_codex_home_dir();
+        hooks.cleanup_unsupported_config()?;
+        crate::relay_config::ensure_windows_sandbox_usable_for_current_user(&home)?;
         if settings.provider_sync_enabled {
             crate::codex_app_state::capture_app_state_snapshot_nonfatal(&home, "launcher.before");
             hooks.run_provider_sync().await?;
@@ -316,9 +549,6 @@ where
                 }),
             );
         }
-        if settings.computer_use_guard_enabled {
-            hooks.ensure_computer_use_config(&settings).await?;
-        }
         match crate::codex_sqlite::sanitize_historical_model_suffixes(&home) {
             Ok(result) if result.updated > 0 => {
                 let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -341,11 +571,47 @@ where
         }
         let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings)
             || remote_control_provider_proxy_enabled(&settings);
+        // issue #2264：重启链路上的模型漂移修复。launcher 不重放完整 apply（那会
+        // 覆盖 Codex 在 UI 选择后回写的 live 值），只在 live config 的 model 仍是
+        // 工具写入的隐式默认且有未归档目标任务时，对齐到目标任务模型。
+        if settings.relay_profiles_enabled {
+            let profile = settings.active_relay_profile();
+            if profile.relay_mode != crate::settings::RelayMode::Official {
+                if let Err(error) =
+                    crate::relay_config::align_live_config_model_with_goal_thread(&home, &profile)
+                {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "launcher.goal_thread_model_align_failed",
+                        serde_json::json!({
+                            "message": error.to_string(),
+                        }),
+                    );
+                }
+            }
+        }
         if protocol_proxy_enabled {
-            helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
+            hooks.ensure_active_protocol_proxy_config(&settings).await?;
+            helper_port = crate::protocol_proxy::protocol_proxy_port();
         }
         if settings.enhancements_enabled || protocol_proxy_enabled {
-            hooks.start_helper(helper_port).await?;
+            // macOS 重启时旧 launcher 的 socket 释放可能稍晚于进程退出。
+            let bind_retry_timeout_ms =
+                helper_bind_retry_timeout_ms(protocol_proxy_enabled, cfg!(target_os = "macos"));
+            start_helper_waiting_for_busy_port(
+                || hooks.start_helper(helper_port),
+                bind_retry_timeout_ms,
+                HELPER_BIND_RETRY_INTERVAL_MS,
+                protocol_proxy_enabled,
+            )
+            .await
+            .map_err(|error| {
+                describe_helper_bind_failure(
+                    error,
+                    helper_port,
+                    protocol_proxy_enabled,
+                    bind_retry_timeout_ms,
+                )
+            })?;
             helper_started = true;
         }
 
@@ -354,9 +620,6 @@ where
             .await?;
         launched = Some(launch.clone());
         keep_launched_on_error = true;
-        if settings.computer_use_guard_enabled {
-            hooks.start_computer_use_guard_watchdog(&settings).await?;
-        }
 
         let mut injection_degraded = false;
         if settings.enhancements_enabled {
@@ -413,6 +676,7 @@ where
     match result {
         Ok(handle) => Ok(handle),
         Err(error) => {
+            hooks.stop_native_browser_compatibility().await;
             if helper_started {
                 hooks.shutdown_helper(helper_port).await;
             }
@@ -561,6 +825,12 @@ impl LaunchHooks for DefaultLaunchHooks {
         SettingsStore::default().load()
     }
 
+    fn cleanup_unsupported_config(&self) -> anyhow::Result<()> {
+        let home = crate::relay_config::default_codex_home_dir();
+        crate::relay_config::cleanup_unsupported_approval_policies_in_home(&home)?;
+        Ok(())
+    }
+
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
         anyhow::bail!("provider sync requires launcher hooks with codex-plus-data integration")
     }
@@ -597,30 +867,23 @@ impl LaunchHooks for DefaultLaunchHooks {
         {
             let auth_contents = (!profile.auth_contents.trim().is_empty())
                 .then_some(profile.auth_contents.as_str());
-            crate::relay_config::clear_relay_config_to_home_with_auth_and_computer_use_guard(
-                &home,
-                auth_contents,
-                settings.computer_use_guard_enabled,
-            )?;
+            crate::relay_config::clear_relay_config_to_home_with_auth(&home, auth_contents)?;
             return Ok(());
         }
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
+        crate::relay_config::apply_relay_profile_to_home_with_switch_rules(
             &home,
             &profile,
             &common_config,
-            settings.computer_use_guard_enabled,
         )?;
         Ok(())
     }
 
-    async fn ensure_computer_use_config(&self, settings: &BackendSettings) -> anyhow::Result<()> {
-        if !settings.computer_use_guard_enabled {
-            return Ok(());
-        }
+    async fn ensure_active_protocol_proxy_config(
+        &self,
+        settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
         let home = crate::relay_config::default_codex_home_dir();
-        let artifacts = crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home)?;
-        crate::computer_use_guard::ensure_computer_use_config_with_artifacts(&home, &artifacts)?;
-        *self.computer_use_guard_artifacts.lock().await = Some(artifacts);
+        crate::relay_config::ensure_active_protocol_proxy_config_in_home(&home, settings)?;
         Ok(())
     }
 
@@ -628,10 +891,11 @@ impl LaunchHooks for DefaultLaunchHooks {
         &self,
         settings: &BackendSettings,
     ) -> anyhow::Result<()> {
+        let home = crate::relay_config::default_codex_home_dir();
+        crate::plugin_marketplace::cleanup_managed_reserved_marketplace_configs(&home)?;
         if !settings.codex_app_plugin_marketplace_unlock {
             return Ok(());
         }
-        let home = crate::relay_config::default_codex_home_dir();
         match crate::plugin_marketplace::ensure_openai_curated_marketplace_config(&home) {
             Ok(configured) => {
                 if configured {
@@ -745,31 +1009,62 @@ impl LaunchHooks for DefaultLaunchHooks {
                 else {
                     unreachable!();
                 };
-                let process_id = activate_packaged_app(app_user_model_id, arguments).await?;
-                apply_codexplusplus_window_icon_after_launch(process_id);
-                if let Some(inspector_port) = native_menu_inspector_port {
-                    start_native_menu_localizer(inspector_port);
+                match activate_packaged_app(app_user_model_id, arguments).await {
+                    Ok(process_id) => {
+                        apply_codexplusplus_window_icon_after_launch(process_id);
+                        if let Some(inspector_port) = native_menu_inspector_port {
+                            start_native_menu_localizer(inspector_port);
+                        }
+                        return Ok(match activation {
+                            CodexLaunch::PackagedActivation {
+                                app_user_model_id,
+                                arguments,
+                                ..
+                            } => CodexLaunch::PackagedActivation {
+                                app_user_model_id,
+                                arguments,
+                                process_id: Some(process_id),
+                            },
+                            CodexLaunch::Process { .. } => unreachable!(),
+                        });
+                    }
+                    Err(error) => {
+                        // AUMID 激活失败（例如清单 Application Id 变化）时回退到
+                        // 直接执行应用，避免整份配置无法启动。
+                        let _ = crate::diagnostic_log::append_diagnostic_log(
+                            "launcher.packaged_activation_fallback",
+                            serde_json::json!({
+                                "app_user_model_id": app_user_model_id,
+                                "app_dir": app_dir,
+                                "error": error.to_string()
+                            }),
+                        );
+                    }
                 }
-                return Ok(match activation {
-                    CodexLaunch::PackagedActivation {
-                        app_user_model_id,
-                        arguments,
-                        ..
-                    } => CodexLaunch::PackagedActivation {
-                        app_user_model_id,
-                        arguments,
-                        process_id: Some(process_id),
-                    },
-                    CodexLaunch::Process { .. } => unreachable!(),
-                });
             }
         }
 
         if app_dir.extension().and_then(|value| value.to_str()) == Some("app") {
-            let cleanup_policy = if is_macos_app_running(app_dir).await {
-                MacosCleanupPolicy::SkipQuitBecauseAlreadyRunning
-            } else {
-                MacosCleanupPolicy::QuitIfNotPreviouslyRunning
+            let launch_action = select_macos_debug_launch_action(
+                is_macos_app_running(app_dir).await,
+                crate::cdp::endpoint_available(debug_port),
+            );
+            let cleanup_policy = match launch_action {
+                MacosDebugLaunchAction::LaunchNew => MacosCleanupPolicy::QuitIfNotPreviouslyRunning,
+                MacosDebugLaunchAction::ReuseRunningDebugApp => {
+                    MacosCleanupPolicy::SkipQuitBecauseAlreadyRunning
+                }
+                MacosDebugLaunchAction::RestartRunningApp => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "launcher.macos_existing_app_without_cdp_restart_requested",
+                        serde_json::json!({
+                            "app_dir": app_dir,
+                            "debug_port": debug_port
+                        }),
+                    );
+                    quit_macos_app_and_wait(app_dir).await?;
+                    MacosCleanupPolicy::QuitIfNotPreviouslyRunning
+                }
             };
             let command = if let Some(inspector_port) = native_menu_inspector_port {
                 build_macos_open_command_with_native_menu_inspector(
@@ -845,6 +1140,8 @@ impl LaunchHooks for DefaultLaunchHooks {
             #[cfg(windows)]
             let pet_cursor_task = tokio::spawn(run_pet_real_mouse_cursor_driver(debug_port));
             let mut observed_browser_id: Option<String> = None;
+            let mut bridge_health_failures = 0u8;
+            let mut bridge_reinject_backoff = BridgeReinjectBackoff::default();
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 tokio::select! {
@@ -869,6 +1166,8 @@ impl LaunchHooks for DefaultLaunchHooks {
                                 helper_port,
                                 identity_changed,
                                 bridge_reinjector.clone(),
+                                &mut bridge_health_failures,
+                                &mut bridge_reinject_backoff,
                             ),
                         );
                         record_pet_overlay_sync_result(debug_port, helper_port, pet_result);
@@ -889,58 +1188,6 @@ impl LaunchHooks for DefaultLaunchHooks {
         {
             let _ = runtime.shutdown.send(());
             let _ = runtime.task.await;
-        }
-        Ok(())
-    }
-
-    async fn start_computer_use_guard_watchdog(
-        &self,
-        settings: &BackendSettings,
-    ) -> anyhow::Result<()> {
-        #[cfg(windows)]
-        {
-            if !settings.computer_use_guard_enabled {
-                return Ok(());
-            }
-            let home = crate::relay_config::default_codex_home_dir();
-            let artifacts = self.computer_use_guard_artifacts.lock().await.clone();
-            let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
-                run_post_launch_computer_use_guard(home, artifacts, &mut shutdown_rx).await;
-            });
-            if let Some(runtime) = self
-                .computer_use_guard_watchdog
-                .lock()
-                .await
-                .replace(ComputerUseGuardWatchdogRuntime { shutdown, task })
-            {
-                let _ = runtime.shutdown.send(());
-                let _ = runtime.task.await;
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = &settings;
-            let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = &mut shutdown_rx => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
-                            crate::computer_use_guard::kill_orphaned_computer_use_processes();
-                        }
-                    }
-                }
-            });
-            if let Some(runtime) = self
-                .computer_use_guard_watchdog
-                .lock()
-                .await
-                .replace(ComputerUseGuardWatchdogRuntime { shutdown, task })
-            {
-                let _ = runtime.shutdown.send(());
-                let _ = runtime.task.await;
-            }
         }
         Ok(())
     }
@@ -972,29 +1219,18 @@ impl LaunchHooks for DefaultLaunchHooks {
                 }
             }
         }
-        let mut empty_streak = 0u32;
-        loop {
-            let has_codex_process = !crate::watcher::find_codex_processes().is_empty();
-            let cdp_available = should_probe_launcher_cdp(cfg!(windows), has_codex_process)
-                && crate::cdp::endpoint_available(debug_port);
-            if !launcher_target_alive(has_codex_process, cdp_available) {
-                empty_streak = empty_streak.saturating_add(1);
-                if empty_streak >= 3 {
-                    break;
-                }
-            } else {
-                empty_streak = 0;
-            }
+        // Another Codex process must not keep this launcher holding the native
+        // browser monitor. Directly owned processes and this debug port can.
+        while owned_launcher_target_alive(
+            launcher_owned_process_alive(launch, debug_port),
+            crate::cdp::endpoint_available(debug_port),
+        ) {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         Ok(())
     }
 
     async fn shutdown_helper(&self, _helper_port: u16) {
-        if let Some(runtime) = self.computer_use_guard_watchdog.lock().await.take() {
-            let _ = runtime.shutdown.send(());
-            let _ = runtime.task.await;
-        }
         if let Some(runtime) = self.bridge_watchdog.lock().await.take() {
             let _ = runtime.shutdown.send(());
             let _ = runtime.task.await;
@@ -1086,6 +1322,35 @@ async fn handle_helper_connection(
 
     if crate::protocol_proxy::is_audio_transcriptions_proxy_path(path) && method == "POST" {
         return handle_audio_transcriptions_proxy_connection(
+            &mut stream,
+            &request.body,
+            request_content_type.as_deref(),
+            request_user_agent.as_deref(),
+            method,
+            path,
+            remote_addr_text,
+        )
+        .await;
+    }
+    if (crate::protocol_proxy::is_image_generations_proxy_path(path)
+        || crate::protocol_proxy::is_image_edits_proxy_path(path))
+        && method == "OPTIONS"
+    {
+        write_http_response(
+            &mut stream,
+            "204 No Content",
+            "application/json; charset=utf-8",
+            &[],
+        )
+        .await?;
+        stream.shutdown().await?;
+        return Ok(());
+    }
+    if (crate::protocol_proxy::is_image_generations_proxy_path(path)
+        || crate::protocol_proxy::is_image_edits_proxy_path(path))
+        && method == "POST"
+    {
+        return handle_image_proxy_connection(
             &mut stream,
             &request.body,
             request_content_type.as_deref(),
@@ -1548,6 +1813,42 @@ async fn handle_protocol_proxy_connection(
     }
     if upstream.is_stream {
         write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
+        if upstream.compaction {
+            // v2 远程压缩：无论上游协议都重组为恰好一个 compaction 输出项，
+            // 压缩无增量展示诉求，收齐上游文本后一次性下发。
+            // SSE 事件可能跨网络 chunk 拆开，converter 内部按事件边界缓冲。
+            let mut converter = crate::protocol_proxy::CompactionSseConverter::new(
+                request_json
+                    .as_ref()
+                    .and_then(|request| request.get("model"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            if upstream.wire_api != crate::protocol_proxy::UpstreamWireApi::Responses {
+                converter = converter.with_chat_upstream();
+            }
+            let mut bytes_stream = upstream.response.bytes_stream();
+            while let Some(chunk) = bytes_stream.next().await {
+                match chunk {
+                    Ok(bytes) => converter.push_upstream_bytes(&bytes),
+                    Err(error) => {
+                        converter.fail(format!("Stream error: {error}"), None);
+                        break;
+                    }
+                }
+            }
+            let payload = converter.finish();
+            stream.write_all(&payload).await?;
+            log_helper_response(
+                "helper.protocol_proxy_compaction_ok",
+                method,
+                path,
+                "200 OK",
+                remote_addr_text,
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
         if upstream.wire_api == crate::protocol_proxy::UpstreamWireApi::Responses {
             let mut bytes_stream = upstream.response.bytes_stream();
             while let Some(chunk) = bytes_stream.next().await {
@@ -1611,6 +1912,27 @@ async fn handle_protocol_proxy_connection(
         return Ok(());
     }
     let upstream_body = upstream.response.bytes().await?;
+    if upstream.compaction {
+        // v2 远程压缩非流式路径：同样重组为单个 compaction 输出项。
+        let body = crate::protocol_proxy::wrap_non_stream_response_as_compaction(
+            &upstream_body,
+            request_json
+                .as_ref()
+                .and_then(|request| request.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )?;
+        write_http_response(stream, "200 OK", "text/event-stream; charset=utf-8", &body).await?;
+        log_helper_response(
+            "helper.protocol_proxy_compaction_ok",
+            method,
+            path,
+            "200 OK",
+            remote_addr_text,
+        );
+        stream.shutdown().await?;
+        return Ok(());
+    }
     if upstream.wire_api == crate::protocol_proxy::UpstreamWireApi::Responses {
         write_http_response(
             stream,
@@ -1705,6 +2027,78 @@ async fn handle_audio_transcriptions_proxy_connection(
             "helper.audio_transcriptions_proxy_ok"
         } else {
             "helper.audio_transcriptions_proxy_upstream_error"
+        },
+        method,
+        path,
+        &status,
+        remote_addr_text,
+    );
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_image_proxy_connection(
+    stream: &mut tokio::net::TcpStream,
+    request_body: &[u8],
+    request_content_type: Option<&str>,
+    request_user_agent: Option<&str>,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+) -> anyhow::Result<()> {
+    let upstream = if crate::protocol_proxy::is_image_generations_proxy_path(path) {
+        crate::protocol_proxy::open_image_generations_proxy_request(
+            request_body,
+            request_user_agent,
+        )
+        .await
+    } else {
+        crate::protocol_proxy::open_image_edits_proxy_request(
+            request_body,
+            request_content_type.unwrap_or_default(),
+            request_user_agent,
+        )
+        .await
+    };
+    let upstream = match upstream {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "status": "failed",
+                "message": error.to_string()
+            }))?;
+            write_http_response(
+                stream,
+                "502 Bad Gateway",
+                "application/json; charset=utf-8",
+                &body,
+            )
+            .await?;
+            log_helper_response(
+                "helper.image_proxy_failed",
+                method,
+                path,
+                "502 Bad Gateway",
+                remote_addr_text,
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    };
+    let status = upstream.response.status().to_string();
+    let is_success = upstream.response.status().is_success();
+    let content_type = if upstream.content_type.is_empty() {
+        "application/json; charset=utf-8".to_string()
+    } else {
+        upstream.content_type.clone()
+    };
+    let body = upstream.response.bytes().await?.to_vec();
+    write_http_response(stream, &status, &content_type, &body).await?;
+    log_helper_response(
+        if is_success {
+            "helper.image_proxy_ok"
+        } else {
+            "helper.image_proxy_upstream_error"
         },
         method,
         path,
@@ -2381,19 +2775,65 @@ async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()
 }
 
 pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> bool {
-    check_and_reinject_bridge_inner(debug_port, helper_port, false, None).await
+    // This one-shot entry point preserves its historical immediate-repair behavior.
+    let mut health_failures = BRIDGE_HEALTH_FAILURE_THRESHOLD.saturating_sub(1);
+    let mut backoff = BridgeReinjectBackoff::default();
+    check_and_reinject_bridge_inner(
+        debug_port,
+        helper_port,
+        false,
+        None,
+        &mut health_failures,
+        &mut backoff,
+    )
+    .await
 }
 
 pub fn browser_identity_changed(previous: Option<&str>, current: &str) -> bool {
     previous.is_some_and(|previous| previous != current)
 }
 
-fn launcher_target_alive(has_codex_process: bool, cdp_available: bool) -> bool {
-    has_codex_process || cdp_available
+fn owned_launcher_target_alive(owned_process_alive: bool, debug_port_open: bool) -> bool {
+    owned_process_alive || debug_port_open
 }
 
-fn should_probe_launcher_cdp(is_windows: bool, has_codex_process: bool) -> bool {
-    is_windows && !has_codex_process
+/// macOS `open` is not the app's parent, so its tracked child exits immediately.
+/// Match the exact debug port in the app process command line instead.
+#[cfg(target_os = "macos")]
+fn launcher_owned_process_alive(launch: &CodexLaunch, debug_port: u16) -> bool {
+    matches!(
+        launch,
+        CodexLaunch::Process {
+            wait_strategy: ProcessWaitStrategy::ExternalWaitCommand,
+            ..
+        }
+    ) && !crate::watcher::find_macos_codex_processes_for_debug_port(debug_port).is_empty()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launcher_owned_process_alive(_launch: &CodexLaunch, _debug_port: u16) -> bool {
+    false
+}
+
+fn should_reinject_after_health_result(
+    healthy: Option<bool>,
+    browser_identity_changed: bool,
+    health_failures: &mut u8,
+) -> bool {
+    let Some(healthy) = healthy else {
+        *health_failures = 0;
+        return false;
+    };
+    if healthy {
+        *health_failures = 0;
+        return false;
+    }
+    if browser_identity_changed {
+        *health_failures = BRIDGE_HEALTH_FAILURE_THRESHOLD;
+    } else {
+        *health_failures = health_failures.saturating_add(1);
+    }
+    *health_failures >= BRIDGE_HEALTH_FAILURE_THRESHOLD
 }
 
 async fn check_and_reinject_bridge_inner(
@@ -2401,12 +2841,14 @@ async fn check_and_reinject_bridge_inner(
     helper_port: u16,
     browser_identity_changed: bool,
     bridge_reinjector: Option<BridgeReinjector>,
+    health_failures: &mut u8,
+    backoff: &mut BridgeReinjectBackoff,
 ) -> bool {
     let healthy = if browser_identity_changed {
-        false
+        Some(false)
     } else {
         match bridge_health_ok(debug_port).await {
-            Ok(healthy) => healthy,
+            Ok(healthy) => Some(healthy),
             Err(error) => {
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "bridge.health_check_failed",
@@ -2416,20 +2858,50 @@ async fn check_and_reinject_bridge_inner(
                         "message": error.to_string()
                     }),
                 );
-                false
+                // A CDP timeout only means that the renderer did not answer
+                // this probe in time. The bridge heartbeat is the source of
+                // truth for actual availability; do not reinject on an
+                // indeterminate CDP result or a busy page will cause churn.
+                None
             }
         }
     };
-    if healthy {
+    match healthy {
+        // 健康恢复或探测不确定时清掉退避；失效计数由 should_reinject_* 统一管理。
+        Some(true) | None => backoff.reset(),
+        Some(false) => {}
+    }
+    if !should_reinject_after_health_result(healthy, browser_identity_changed, health_failures) {
         return false;
     }
+    if browser_identity_changed {
+        // 应用实例更换：旧退避针对的是旧页面，新页面需要立即注入。
+        backoff.reset();
+    }
+    let now = std::time::Instant::now();
+    if !backoff.ready(now) {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "bridge.reinject_backoff_skipped",
+            serde_json::json!({
+                "debug_port": debug_port,
+                "helper_port": helper_port,
+                "consecutive_reinjections": backoff.consecutive_attempts,
+                "next_reinject_allowed_in_ms": backoff
+                    .next_allowed_at
+                    .map(|deadline| deadline.saturating_duration_since(now).as_millis() as u64),
+            }),
+        );
+        return false;
+    }
+    backoff.record_attempt(now);
 
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "bridge.reinject_start",
         serde_json::json!({
             "debug_port": debug_port,
             "helper_port": helper_port,
-            "browser_identity_changed": browser_identity_changed
+            "browser_identity_changed": browser_identity_changed,
+            "consecutive_health_failures": *health_failures
         }),
     );
     let default_reinjector: BridgeReinjector =
@@ -2444,6 +2916,7 @@ async fn check_and_reinject_bridge_inner(
                     "helper_port": helper_port
                 }),
             );
+            *health_failures = 0;
             true
         }
         Err(error) => {
@@ -2780,6 +3253,17 @@ pub fn build_macos_cleanup_command(
     ])
 }
 
+pub fn select_macos_debug_launch_action(
+    app_running: bool,
+    codex_cdp_available: bool,
+) -> MacosDebugLaunchAction {
+    match (app_running, codex_cdp_available) {
+        (false, _) => MacosDebugLaunchAction::LaunchNew,
+        (true, true) => MacosDebugLaunchAction::ReuseRunningDebugApp,
+        (true, false) => MacosDebugLaunchAction::RestartRunningApp,
+    }
+}
+
 async fn run_macos_cleanup_command(
     app_dir: &Path,
     policy: MacosCleanupPolicy,
@@ -2797,6 +3281,31 @@ async fn run_macos_cleanup_command(
         .status()
         .await
         .with_context(|| format!("failed to request macOS app quit for {}", app_dir.display()))?;
+    Ok(())
+}
+
+async fn quit_macos_app_and_wait(app_dir: &Path) -> anyhow::Result<()> {
+    run_macos_cleanup_command(app_dir, MacosCleanupPolicy::QuitIfNotPreviouslyRunning).await?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(MACOS_DEBUG_TAKEOVER_WAIT_MS);
+    while is_macos_app_running(app_dir).await {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "macOS app did not exit before debug relaunch: {}",
+                app_dir.display()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            MACOS_DEBUG_TAKEOVER_INTERVAL_MS,
+        ))
+        .await;
+    }
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "launcher.macos_existing_app_without_cdp_stopped",
+        serde_json::json!({
+            "app_dir": app_dir
+        }),
+    );
     Ok(())
 }
 
@@ -2831,119 +3340,6 @@ async fn is_macos_app_running(app_dir: &Path) -> bool {
         && String::from_utf8_lossy(&output.stdout)
             .trim()
             .eq_ignore_ascii_case("true")
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn post_launch_guard_artifacts_ready(
-    artifacts: &crate::computer_use_guard::GuardArtifacts,
-) -> bool {
-    artifacts.notify_exe.is_some()
-        && artifacts.marketplace_path.is_some()
-        && (!artifacts.runtime_exports_needed || artifacts.sky_package_json.is_some())
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn should_stop_post_launch_computer_use_guard(
-    stable_unchanged_attempts: usize,
-    artifacts: &crate::computer_use_guard::GuardArtifacts,
-) -> bool {
-    stable_unchanged_attempts >= POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS
-        && post_launch_guard_artifacts_ready(artifacts)
-}
-
-#[cfg(windows)]
-async fn run_post_launch_computer_use_guard(
-    home: PathBuf,
-    mut artifacts: Option<crate::computer_use_guard::GuardArtifacts>,
-    shutdown_rx: &mut tokio::sync::oneshot::Receiver<()>,
-) {
-    let mut previous_delay = 0_u64;
-    let mut stable_unchanged_attempts = 0_usize;
-    for (index, delay) in POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS
-        .iter()
-        .copied()
-        .enumerate()
-    {
-        let wait_seconds = delay.saturating_sub(previous_delay);
-        previous_delay = delay;
-        if wait_seconds > 0 {
-            tokio::select! {
-                _ = &mut *shutdown_rx => return,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(wait_seconds)) => {}
-            }
-        }
-        let attempt = index + 1;
-        let resolved_artifacts = match artifacts.take() {
-            Some(artifacts) => artifacts,
-            None => match crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    stable_unchanged_attempts = 0;
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "computer_use_guard.post_launch_failed",
-                        serde_json::json!({
-                            "attempt": attempt,
-                            "delay_seconds": delay,
-                            "phase": "resolve_artifacts",
-                            "message": error.to_string()
-                        }),
-                    );
-                    continue;
-                }
-            },
-        };
-        let artifacts_ready = post_launch_guard_artifacts_ready(&resolved_artifacts);
-        artifacts = artifacts_ready.then_some(resolved_artifacts.clone());
-        match crate::computer_use_guard::ensure_computer_use_config_with_artifacts(
-            &home,
-            &resolved_artifacts,
-        ) {
-            Ok(result) => {
-                if !result.changed && artifacts_ready {
-                    stable_unchanged_attempts += 1;
-                } else {
-                    stable_unchanged_attempts = 0;
-                }
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "computer_use_guard.post_launch_ok",
-                    serde_json::json!({
-                        "attempt": attempt,
-                        "delay_seconds": delay,
-                        "changed": result.changed,
-                        "stable_unchanged_attempts": stable_unchanged_attempts,
-                        "notify_exe": result
-                            .notify_exe
-                            .map(|path| path.to_string_lossy().to_string())
-                    }),
-                );
-                if should_stop_post_launch_computer_use_guard(
-                    stable_unchanged_attempts,
-                    &resolved_artifacts,
-                ) {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "computer_use_guard.post_launch_stable_stop",
-                        serde_json::json!({
-                            "attempt": attempt,
-                            "delay_seconds": delay,
-                            "stable_unchanged_attempts": stable_unchanged_attempts
-                        }),
-                    );
-                    return;
-                }
-            }
-            Err(error) => {
-                stable_unchanged_attempts = 0;
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "computer_use_guard.post_launch_failed",
-                    serde_json::json!({
-                        "attempt": attempt,
-                        "delay_seconds": delay,
-                        "message": error.to_string()
-                    }),
-                );
-            }
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -3030,6 +3426,7 @@ fn launch_status(
         debug_port: Some(debug_port),
         helper_port: Some(helper_port),
         codex_app: Some(app_dir.to_string_lossy().to_string()),
+        aumid: crate::app_paths::packaged_app_user_model_id(app_dir),
     }
 }
 
@@ -3149,15 +3546,198 @@ mod tests {
     }
 
     #[test]
-    fn launcher_stays_alive_while_injected_cdp_endpoint_is_available() {
-        assert!(launcher_target_alive(false, true));
+    fn owned_launcher_exit_follows_its_debug_port_not_other_codex_processes() {
+        assert!(owned_launcher_target_alive(false, true));
+        assert!(!owned_launcher_target_alive(false, false));
     }
 
     #[test]
-    fn launcher_only_probes_cdp_for_unrecognized_windows_processes() {
-        assert!(should_probe_launcher_cdp(true, false));
-        assert!(!should_probe_launcher_cdp(true, true));
-        assert!(!should_probe_launcher_cdp(false, false));
+    fn owned_launcher_waits_for_its_codex_process_when_cdp_is_unavailable() {
+        assert!(owned_launcher_target_alive(true, false));
+    }
+
+    #[test]
+    fn bridge_health_failures_reinject_only_after_consecutive_unhealthy_results() {
+        let mut failures = 0;
+        assert!(!should_reinject_after_health_result(
+            Some(false),
+            false,
+            &mut failures
+        ));
+        assert_eq!(failures, 1);
+        assert!(should_reinject_after_health_result(
+            Some(false),
+            false,
+            &mut failures
+        ));
+        assert_eq!(failures, BRIDGE_HEALTH_FAILURE_THRESHOLD);
+        assert!(!should_reinject_after_health_result(
+            Some(true),
+            false,
+            &mut failures
+        ));
+        assert_eq!(failures, 0);
+
+        failures = 1;
+        assert!(!should_reinject_after_health_result(
+            None,
+            false,
+            &mut failures
+        ));
+        assert_eq!(failures, 0);
+        assert!(should_reinject_after_health_result(
+            Some(false),
+            true,
+            &mut failures
+        ));
+    }
+
+    #[test]
+    fn reinject_backoff_delay_doubles_and_caps() {
+        assert_eq!(reinject_backoff_delay(0), std::time::Duration::from_secs(10));
+        assert_eq!(reinject_backoff_delay(1), std::time::Duration::from_secs(20));
+        assert_eq!(reinject_backoff_delay(2), std::time::Duration::from_secs(40));
+        assert_eq!(reinject_backoff_delay(4), std::time::Duration::from_secs(160));
+        assert_eq!(reinject_backoff_delay(5), std::time::Duration::from_secs(300));
+        assert_eq!(reinject_backoff_delay(32), std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn reinject_backoff_blocks_until_deadline_and_resets_on_recovery() {
+        let now = std::time::Instant::now();
+        let mut backoff = BridgeReinjectBackoff::default();
+        assert!(backoff.ready(now), "首次重注入应立即允许");
+
+        backoff.record_attempt(now);
+        assert_eq!(backoff.consecutive_attempts, 1);
+        assert!(!backoff.ready(now), "重注入后应进入退避窗口");
+        assert!(backoff.ready(now + reinject_backoff_delay(0)));
+
+        backoff.record_attempt(now + reinject_backoff_delay(0));
+        assert_eq!(backoff.consecutive_attempts, 2);
+        assert!(!backoff.ready(now + reinject_backoff_delay(0)));
+        assert!(backoff.ready(
+            now + reinject_backoff_delay(0) + reinject_backoff_delay(1)
+        ));
+
+        backoff.reset();
+        assert_eq!(backoff.consecutive_attempts, 0);
+        assert!(backoff.ready(now), "健康恢复后应立即允许重注入");
+    }
+
+    #[test]
+    fn helper_bind_retry_covers_fixed_proxy_ports_and_macos_restarts() {
+        assert_eq!(
+            helper_bind_retry_timeout_ms(true, false),
+            PROTOCOL_PROXY_BIND_RETRY_TIMEOUT_MS
+        );
+        assert_eq!(
+            helper_bind_retry_timeout_ms(false, true),
+            HELPER_BIND_RETRY_TIMEOUT_MS
+        );
+        assert_eq!(helper_bind_retry_timeout_ms(false, false), 0);
+        assert_eq!(
+            helper_bind_retry_timeout_ms(true, true),
+            PROTOCOL_PROXY_BIND_RETRY_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn fixed_helper_port_is_required_only_when_protocol_proxy_is_used() {
+        assert_eq!(required_fixed_helper_port(&BackendSettings::default()), None);
+
+        let official_mix = BackendSettings {
+            active_relay_id: "official-mix".to_string(),
+            relay_profiles: vec![crate::settings::RelayProfile {
+                id: "official-mix".to_string(),
+                relay_mode: crate::settings::RelayMode::Official,
+                official_mix_api_key: true,
+                protocol: crate::settings::RelayProtocol::Responses,
+                ..crate::settings::RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+        assert_eq!(
+            required_fixed_helper_port(&official_mix),
+            Some(crate::protocol_proxy::protocol_proxy_port())
+        );
+    }
+
+    #[test]
+    fn fixed_port_wait_retries_transient_forbidden_and_stops_on_other_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("diagnostic.log");
+        crate::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path));
+        struct RestoreLog;
+        impl Drop for RestoreLog {
+            fn drop(&mut self) {
+                crate::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+            }
+        }
+        let _restore = RestoreLog;
+
+        let forbidden_attempts = std::cell::Cell::new(0u32);
+        let sleeps = std::cell::Cell::new(0u32);
+        wait_for_fixed_helper_port(
+            57321,
+            400,
+            200,
+            |_| {
+                let attempt = forbidden_attempts.get();
+                forbidden_attempts.set(attempt + 1);
+                if attempt < 2 {
+                    Err(std::io::Error::from_raw_os_error(10013))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| sleeps.set(sleeps.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(forbidden_attempts.get(), 3);
+        assert_eq!(sleeps.get(), 2);
+
+        let probes = std::cell::Cell::new(0u32);
+        let other_sleeps = std::cell::Cell::new(0u32);
+        let error = wait_for_fixed_helper_port(
+            57321,
+            10_000,
+            200,
+            |_| {
+                probes.set(probes.get() + 1);
+                Err(std::io::Error::other("simulated unrelated failure"))
+            },
+            |_| other_sleeps.set(other_sleeps.get() + 1),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert_eq!(probes.get(), 1);
+        assert_eq!(other_sleeps.get(), 0);
+        assert!(message.contains("simulated unrelated failure"), "{message}");
+        assert!(!message.contains("被其他进程占用"), "{message}");
+        assert!(!message.contains("被 Windows 保留"), "{message}");
+
+        let permanent_probes = std::cell::Cell::new(0u32);
+        let permanent_sleeps = std::cell::Cell::new(0u32);
+        let error = wait_for_fixed_helper_port(
+            57321,
+            400,
+            200,
+            |_| {
+                permanent_probes.set(permanent_probes.get() + 1);
+                Err(std::io::Error::from_raw_os_error(10013))
+            },
+            |_| permanent_sleeps.set(permanent_sleeps.get() + 1),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert_eq!(permanent_probes.get(), 3);
+        assert_eq!(permanent_sleeps.get(), 2);
+        assert!(message.contains("os error 10013"), "{message}");
+        assert!(!message.contains("被其他进程占用"), "{message}");
+        if cfg!(windows) {
+            assert!(message.contains("被 Windows 保留"), "{message}");
+        }
     }
 
     #[tokio::test]
@@ -3306,6 +3886,75 @@ mod tests {
         .await;
 
         assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 426 Upgrade Required"));
+    }
+
+    #[tokio::test]
+    async fn helper_keeps_unknown_image_path_as_not_found() {
+        let response = send_raw_helper_request(
+            b"POST /v1/images/unknown HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        )
+        .await;
+
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(response.contains("未知后端路径"));
+    }
+
+    #[tokio::test]
+    async fn helper_proxies_image_generation_upstream_error_response() {
+        let _settings_guard = crate::paths::settings_path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let previous_settings_path =
+            crate::paths::set_settings_path_for_tests(Some(settings_path.clone()));
+        let upstream_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let settings = serde_json::json!({
+            "relayProfiles": [{
+                "id": "images",
+                "name": "Images",
+                "baseUrl": format!("http://{upstream_addr}/v1"),
+                "upstreamBaseUrl": format!("http://{upstream_addr}/v1"),
+                "apiKey": "sk-test",
+                "protocol": "responses",
+                "relayMode": "mixedApi"
+            }],
+            "activeRelayId": "images"
+        });
+        std::fs::write(settings_path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = br#"{"error":{"message":"rate limited"}}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/problem+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            request
+        });
+        let request_body = br#"{"model":"gpt-image-2","prompt":"draw a square"}"#;
+        let headers = format!(
+            "POST /v1/images/generations HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            request_body.len()
+        );
+        let mut request = headers.into_bytes();
+        request.extend_from_slice(request_body);
+
+        let response = send_raw_helper_request(&request).await;
+
+        let response_text = String::from_utf8_lossy(&response);
+        assert!(response_text.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(response_text.contains("Content-Type: application/problem+json"));
+        assert!(response.ends_with(br#"{"error":{"message":"rate limited"}}"#));
+        let upstream_request = upstream.await.unwrap();
+        let request_line = String::from_utf8_lossy(&upstream_request.headers);
+        assert!(request_line.starts_with("POST /v1/images/generations HTTP/1.1"));
+        assert_eq!(upstream_request.body, request_body);
+        crate::paths::set_settings_path_for_tests(previous_settings_path);
     }
 
     #[test]
@@ -3534,53 +4183,5 @@ mod tests {
         helper.await.unwrap();
         assert_eq!(upstream.await.unwrap(), expected_body);
         crate::paths::set_settings_path_for_tests(previous_settings_path);
-    }
-
-    #[test]
-    fn post_launch_guard_stops_after_stable_ready_artifacts() {
-        let artifacts = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
-            sky_package_json: None,
-            runtime_exports_needed: false,
-        };
-
-        assert!(!should_stop_post_launch_computer_use_guard(2, &artifacts));
-        assert!(should_stop_post_launch_computer_use_guard(3, &artifacts));
-    }
-
-    #[test]
-    fn post_launch_guard_keeps_retrying_until_artifacts_are_ready() {
-        let missing_notify = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: None,
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
-            sky_package_json: None,
-            runtime_exports_needed: false,
-        };
-        let missing_marketplace = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: None,
-            sky_package_json: None,
-            runtime_exports_needed: false,
-        };
-        let missing_runtime_package = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
-            sky_package_json: None,
-            runtime_exports_needed: true,
-        };
-
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_notify
-        ));
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_marketplace
-        ));
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_runtime_package
-        ));
     }
 }

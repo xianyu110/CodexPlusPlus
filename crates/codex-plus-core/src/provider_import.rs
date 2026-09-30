@@ -190,18 +190,19 @@ fn relay_profile_from_request(
         protocol: relay_protocol(&request.wire_api),
         relay_mode: relay_mode(&request.relay_mode),
         official_mix_api_key: false,
+        no_auth: false,
         hide_official_usage_alert: false,
         test_model: String::new(),
         config_contents: request.config_contents.clone(),
         auth_contents: request.auth_contents.clone(),
         use_common_config: true,
-        context_selection: crate::settings::RelayContextSelection::default(),
-        context_selection_initialized: false,
         context_window: String::new(),
         auto_compact_limit: String::new(),
         model_insert_mode: Default::default(),
         model_list: String::new(),
         model_windows: String::new(),
+        model_auto_compact: String::new(),
+        model_metadata: String::new(),
         model_vlm: String::new(),
         vlm_api_key: String::new(),
         vlm_model: String::new(),
@@ -210,6 +211,8 @@ fn relay_profile_from_request(
         sub2api_enabled: false,
         sub2api_multiplier: String::new(),
         model_routes: Vec::new(),
+        custom_headers: Vec::new(),
+        standard_openai_protocol: false,
     }
 }
 
@@ -254,10 +257,11 @@ fn relay_mode(value: &str) -> RelayMode {
 }
 
 fn build_config_toml(base_url: &str, api_key: &str, protocol: RelayProtocol) -> String {
-    let wire_api = match protocol {
-        RelayProtocol::Responses => "responses",
-        RelayProtocol::ChatCompletions => "chat",
-    };
+    // Codex 26.901+ 不再支持 wire_api = "chat"（openai/codex discussion #7782），
+    // 写出 "chat" 会导致整份 config.toml 无效并回退默认。Chat Completions 上游
+    // 一律经由本地协议代理转换，对 Codex 始终暴露 "responses"。
+    let _ = protocol;
+    let wire_api = "responses";
     [
         "model_provider = \"CodexPlusPlus\"".to_string(),
         String::new(),

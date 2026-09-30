@@ -13,7 +13,21 @@ struct AppPackageSpec {
 }
 
 const CODEX_PACKAGE_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
+#[cfg(not(target_os = "linux"))]
 const STANDALONE_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
+
+/// Linux 可执行文件名（原生优先，兼容便携包）
+#[cfg(target_os = "linux")]
+const LINUX_CODEX_EXECUTABLES: &[&str] = &[
+    "ChatGPT",
+    "chatgpt",
+    "Codex",
+    "codex",
+    "ChatGPT.exe",
+    "Codex.exe",
+    "codex.exe",
+];
+
 
 #[cfg(windows)]
 const OPENAI_PACKAGE_FAMILY_NAMES: &[&str] = &[
@@ -46,7 +60,8 @@ const APP_PACKAGE_SPECS: &[AppPackageSpec] = &[
         identity: "OpenAI.ChatGPT-Desktop",
         app_id: "App",
         executable_names: CODEX_PACKAGE_EXECUTABLES,
-        priority: 1,
+        // Codex 已迁移为新的 ChatGPT Desktop；同机并存时优先新宿主。
+        priority: 2,
     },
 ];
 
@@ -63,12 +78,7 @@ pub fn find_latest_codex_app_dir(root: &Path) -> Option<PathBuf> {
             Some((spec.priority, version, app_dir))
         })
         .collect::<Vec<_>>();
-    matches.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .reverse()
-            .then_with(|| left.1.cmp(&right.1))
-    });
+    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     let (_, _, latest) = matches.pop()?;
     Some(latest)
 }
@@ -83,35 +93,45 @@ pub fn find_latest_codex_app_dir_from_roots(roots: &[PathBuf]) -> Option<PathBuf
 pub fn find_latest_codex_app_dir_default() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        find_latest_codex_app_dir_from_roots(&windows_app_package_roots())
-            .or_else(find_latest_codex_app_dir_from_appx_package)
+        // 注册信息是 Store 当前状态的权威来源；查询失败时再退回目录扫描。
+        if let Ok(Some(appx)) = find_latest_codex_app_dir_from_appx_package() {
+            return Some(appx);
+        }
+        windows_app_package_roots()
+            .iter()
+            .filter_map(|root| find_latest_codex_app_dir(root))
+            .max_by(compare_app_dir_candidates)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        find_macos_codex_app_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        find_linux_codex_app_default()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         None
     }
-}
 
+}
 #[cfg(windows)]
-fn find_latest_codex_app_dir_from_appx_package() -> Option<PathBuf> {
-    registered_windows_packages()
-        .ok()?
+fn find_latest_codex_app_dir_from_appx_package() -> anyhow::Result<Option<PathBuf>> {
+    Ok(registered_windows_packages()?
         .into_iter()
         .filter(|package| is_supported_windows_app_package_name(&package.full_name))
         .filter_map(|package| normalize_codex_app_path(&package.install_location))
-        .max_by(compare_app_dir_candidates)
+        .max_by(compare_app_dir_candidates))
 }
 
 #[cfg(windows)]
 pub(crate) fn registered_windows_packages() -> anyhow::Result<Vec<RegisteredWindowsPackage>> {
-    use std::sync::OnceLock;
-
-    static PACKAGES: OnceLock<Result<Vec<RegisteredWindowsPackage>, String>> = OnceLock::new();
-    PACKAGES
-        .get_or_init(|| query_registered_windows_packages().map_err(|error| error.to_string()))
-        .clone()
-        .map_err(anyhow::Error::msg)
+    // AppX 包在 Codex 更新后会改变 full name 和安装目录，不能跨启动周期缓存。
+    query_registered_windows_packages()
 }
 
 #[cfg(windows)]
@@ -275,12 +295,85 @@ pub fn find_macos_codex_app_default() -> Option<PathBuf> {
     find_macos_codex_app(&roots)
 }
 
+
+pub fn find_linux_codex_app(search_roots: &[PathBuf]) -> Option<PathBuf> {
+    for root in search_roots {
+        for candidate in linux_app_candidates(root) {
+            if let Some(app_dir) = normalize_codex_app_path(&candidate) {
+                return Some(app_dir);
+            }
+        }
+    }
+    None
+}
+
+fn linux_app_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // 直接匹配应用目录（仅在目录实际存在时推入）
+    for name in &["ChatGPT", "chatgpt", "Codex", "codex"] {
+        let app_dir = root.join(name);
+        if app_dir.is_dir() {
+            candidates.push(app_dir.clone());
+            let app_sub = app_dir.join("app");
+            if app_sub.is_dir() {
+                candidates.push(app_sub);
+            }
+        }
+    }
+    // 扫描根目录下的一级子目录，查找包含可执行文件的 app 目录
+    // 例如：/usr/lib/chatgpt/ChatGPT（可执行文件直接在子目录中）
+    #[cfg(target_os = "linux")]
+    {
+        if root.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let name = path.file_name().and_then(OsStr::to_str);
+                    if let Some(name) = name {
+                        let lower = name.to_ascii_lowercase();
+                        if lower == "chatgpt" || lower == "codex" || lower == "codex-beta" {
+                            candidates.push(path.clone());
+                            // 也检查该子目录的 app 子目录（AppDir 结构）
+                            let app_sub = path.join("app");
+                            if app_sub.is_dir() {
+                                candidates.push(app_sub);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    candidates
+}
+
+pub fn find_linux_codex_app_default() -> Option<PathBuf> {
+    let home = directories::BaseDirs::new();
+    let mut roots = Vec::new();
+    // 系统级（官方 deb 默认安装在 /usr/lib/chatgpt）
+    roots.push(PathBuf::from("/usr/lib"));
+    roots.push(PathBuf::from("/opt"));
+    // 用户级
+    if let Some(h) = home {
+        roots.push(h.home_dir().join("Applications"));
+        roots.push(h.home_dir().join(".local").join("share"));
+    }
+    find_linux_codex_app(&roots)
+}
+
 pub fn resolve_codex_app_dir(app_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(app_dir) = app_dir {
         return normalize_codex_app_path(app_dir);
     }
     if cfg!(target_os = "macos") {
         return find_macos_codex_app_default();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return find_linux_codex_app_default();
     }
     // Windows: try MS Store version first, then standalone install
     find_latest_codex_app_dir_default().or_else(|| find_standalone_codex_app_dir())
@@ -317,6 +410,62 @@ pub fn find_standalone_codex_app_dir() -> Option<PathBuf> {
     None
 }
 
+/// Finds the CLI shipped by the standalone Codex installer.
+pub fn find_standalone_codex_cli() -> Option<PathBuf> {
+    let local_appdata = std::env::var_os("LOCALAPPDATA")?;
+    find_standalone_codex_cli_in(&PathBuf::from(local_appdata).join("OpenAI").join("Codex").join("bin"))
+}
+
+fn find_standalone_codex_cli_in(bin_dir: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = standalone_cli_in_dir(bin_dir) { candidates.push(path); }
+    if let Ok(entries) = std::fs::read_dir(bin_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(path) = standalone_cli_in_dir(&entry.path()) { candidates.push(path); }
+            }
+        }
+    }
+    candidates.sort_by_key(|path| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok());
+    candidates.pop()
+}
+
+fn standalone_cli_in_dir(dir: &Path) -> Option<PathBuf> {
+    ["codex.exe", "codex", "Codex.exe", "Codex"].iter().map(|name| dir.join(name)).find(|path| path.is_file())
+}
+
+#[cfg(test)]
+mod standalone_cli_tests {
+    use super::find_standalone_codex_cli_in;
+
+    #[test]
+    fn standalone_cli_finds_latest_versioned_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("codex.exe"), "old").unwrap();
+        std::fs::write(new.join("codex.exe"), "new").unwrap();
+        std::fs::File::options().write(true).open(old.join("codex.exe")).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))).unwrap();
+        assert_eq!(find_standalone_codex_cli_in(temp.path()), Some(new.join("codex.exe")));
+    }
+
+    #[test]
+    fn standalone_cli_returns_none_without_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(find_standalone_codex_cli_in(temp.path()), None);
+    }
+
+    #[test]
+    fn standalone_cli_finds_unversioned_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("codex.exe");
+        std::fs::write(&binary, "cli").unwrap();
+        assert_eq!(find_standalone_codex_cli_in(temp.path()), Some(binary));
+    }
+}
+
 pub fn resolve_codex_app_dir_with_saved(
     app_dir: Option<&Path>,
     saved_app_path: Option<&str>,
@@ -331,10 +480,30 @@ pub fn resolve_codex_app_dir_with_saved(
     {
         // 已保存路径无效（例如误选 Codex++）时回退自动探测
         if let Some(path) = normalize_codex_app_path(Path::new(saved)) {
+            #[cfg(windows)]
+            if is_codex_store_package_dir(&path) {
+                // Store 更新会生成新的版本目录；注册查询成功时选择当前最高版本，
+                // 查询失败则保留已保存路径，兼容离线或受限环境。
+                return Some(resolve_saved_store_path(
+                    path,
+                    find_latest_codex_app_dir_from_appx_package(),
+                ));
+            }
             return Some(path);
         }
     }
     resolve_codex_app_dir(None)
+}
+
+#[cfg(windows)]
+fn resolve_saved_store_path(
+    saved_path: PathBuf,
+    current: anyhow::Result<Option<PathBuf>>,
+) -> PathBuf {
+    match current {
+        Ok(Some(current)) => current,
+        Ok(None) | Err(_) => saved_path,
+    }
 }
 
 pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
@@ -347,9 +516,8 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-    if is_supported_app_executable_name(file_name) {
-        return path.parent().map(Path::to_path_buf);
+    if !path.exists() {
+        return None;
     }
 
     if path.extension() == Some(OsStr::new("app")) {
@@ -357,7 +525,7 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
     }
 
     if path.is_file() {
-        // 任意普通文件不再视为应用根；仅当父目录已是合法 Codex 目录时取父路径
+        // 任意普通文件或可执行文件自身不再视为应用根；仅当父目录已是合法 Codex 目录时取父路径
         let parent = path.parent()?;
         return normalize_codex_app_path(parent);
     }
@@ -432,7 +600,74 @@ pub fn build_codex_executable(app_dir: &Path) -> PathBuf {
     if let Some(spec) = package_spec_from_path(app_dir) {
         return app_dir.join(spec.executable_names[0]);
     }
-    app_dir.join("Codex.exe")
+    #[cfg(target_os = "linux")]
+    {
+        app_dir.join("ChatGPT")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        app_dir.join("Codex.exe")
+    }
+}
+
+pub fn find_bundled_codex_cli(app_dir: &Path) -> Option<PathBuf> {
+    let candidates = if app_dir.extension() == Some(OsStr::new("app")) {
+        vec![app_dir.join("Contents").join("Resources").join("codex")]
+    } else {
+        vec![
+            app_dir.join("resources").join("codex.exe"),
+            app_dir.join("Resources").join("codex.exe"),
+            app_dir.join("resources").join("codex"),
+            app_dir.join("Resources").join("codex"),
+        ]
+    };
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// 是否指向 Store 版安装目录（WindowsApps）里的可执行文件。
+///
+/// MSIX 包目录受系统保护，第三方进程不能直接执行其中的 exe，
+/// 改文件夹权限也不会生效（#2028：微信连接填「桌面版内置 CLI」必然 os error 5）。
+/// macOS 的 .app/Contents/Resources/codex 是普通可执行文件，不受此限制。
+pub fn is_windows_store_cli_path(executable: &str) -> bool {
+    executable
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+        .contains("\\windowsapps\\")
+}
+
+/// 桌面版在用户目录维护的 Codex CLI——Windows 上的标准路径。
+///
+/// Store 版桌面应用会把可独立执行的 CLI 放在
+/// `%LOCALAPPDATA%\OpenAI\Codex\bin\<哈希>\codex.exe` 并随桌面版一起更新；
+/// 该目录在系统保护目录之外，第三方进程可以直接运行。目录名是内容哈希，
+/// 每次更新都会变，所以不能缓存、只按「含 codex.exe 的最新子目录」解析；
+/// 兼容旧的平铺布局 `bin\codex.exe`（#2028/#1879 的根治路径）。
+pub fn find_desktop_managed_codex_cli() -> Option<PathBuf> {
+    find_desktop_managed_codex_cli_from_var(
+        std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+    )
+}
+
+fn find_desktop_managed_codex_cli_from_var(local_appdata: Option<&Path>) -> Option<PathBuf> {
+    let bin = local_appdata?.join("OpenAI").join("Codex").join("bin");
+    let mut candidates = vec![bin.join("codex.exe")];
+    if let Ok(entries) = std::fs::read_dir(&bin) {
+        for entry in entries.filter_map(Result::ok) {
+            candidates.push(entry.path().join("codex.exe"));
+        }
+    }
+    candidates
+        .into_iter()
+        .filter(|exe| exe.is_file())
+        .filter_map(|exe| {
+            let modified = std::fs::metadata(&exe)
+                .and_then(|metadata| metadata.modified())
+                .ok()?;
+            Some((modified, exe))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, exe)| exe)
 }
 
 pub fn codex_app_version(app_dir: &Path) -> Option<String> {
@@ -461,7 +696,57 @@ pub fn packaged_app_user_model_id(app_dir: &Path) -> Option<String> {
     if publisher_id.is_empty() {
         return None;
     }
-    Some(format!("{}_{publisher_id}!{}", spec.identity, spec.app_id))
+    // 新版 ChatGPT-Desktop 可能改变包内 Application Id（参见 #2148 的 0x80270254 报错），
+    // 这里优先读取真实 manifest，读取失败再回退到历史硬编码值。
+    //
+    // 注意：这段逻辑曾被 #2202 的 799ef0c9（一个纯 Linux 修复）基于旧基线静默回退掉，
+    // 导致 #2308/#2310 的「该进程没有程序包标识符」。恢复时连同下面的测试一起。
+    let app_id = packaged_manifest_app_id(app_dir).unwrap_or_else(|| spec.app_id.to_string());
+    Some(format!("{}_{publisher_id}!{app_id}", spec.identity))
+}
+
+fn packaged_manifest_app_id(app_dir: &Path) -> Option<String> {
+    let package_dir = if app_dir
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("app"))
+    {
+        app_dir.parent()?
+    } else {
+        app_dir
+    };
+    let manifest = std::fs::read_to_string(package_dir.join("AppxManifest.xml")).ok()?;
+    manifest_first_application_id(&manifest)
+}
+
+// AppxManifest.xml 中第一个 <Application> 节点的 Id，即 AUMID 感叹号后的部分。
+fn manifest_first_application_id(manifest: &str) -> Option<String> {
+    let mut rest = manifest;
+    while let Some(pos) = rest.find("<Application") {
+        rest = &rest[pos + "<Application".len()..];
+        // 跳过 <Applications> 等容器节点，只处理 <Application ...>。
+        if !rest.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let tag_end = rest.find('>')?;
+        if let Some(id) = xml_attribute_value(&rest[..tag_end], "Id") {
+            return Some(id);
+        }
+        rest = &rest[tag_end..];
+    }
+    None
+}
+
+fn xml_attribute_value(tag: &str, name: &str) -> Option<String> {
+    for segment in tag.split_whitespace() {
+        let Some((attr, value)) = segment.split_once('=') else {
+            continue;
+        };
+        if attr != name {
+            continue;
+        }
+        return Some(value.trim_matches('"').trim_matches('\'').to_string());
+    }
+    None
 }
 
 fn package_name_from_app_dir(app_dir: &Path) -> Option<String> {
@@ -596,7 +881,18 @@ pub(crate) fn is_supported_windows_app_package_name(package_name: &str) -> bool 
 }
 
 pub(crate) fn is_supported_app_executable_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("Codex.exe") || name.eq_ignore_ascii_case("ChatGPT.exe")
+    // Windows
+    if name.eq_ignore_ascii_case("Codex.exe") || name.eq_ignore_ascii_case("ChatGPT.exe") {
+        return true;
+    }
+    // Linux（无扩展名）
+    #[cfg(target_os = "linux")]
+    {
+        if name.eq_ignore_ascii_case("Codex") || name.eq_ignore_ascii_case("ChatGPT") {
+            return true;
+        }
+    }
+    false
 }
 
 fn package_spec_from_path(path: &Path) -> Option<AppPackageSpec> {
@@ -609,7 +905,7 @@ fn compare_app_dir_candidates(left: &PathBuf, right: &PathBuf) -> std::cmp::Orde
     app_dir_sort_key(left).cmp(&app_dir_sort_key(right))
 }
 
-fn app_dir_sort_key(app_dir: &Path) -> Option<(std::cmp::Reverse<u8>, Vec<u32>)> {
+fn app_dir_sort_key(app_dir: &Path) -> Option<(u8, Vec<u32>)> {
     let spec = package_spec_from_path(app_dir)?;
     let package_dir = if app_dir
         .file_name()
@@ -620,10 +916,7 @@ fn app_dir_sort_key(app_dir: &Path) -> Option<(std::cmp::Reverse<u8>, Vec<u32>)>
     } else {
         app_dir
     };
-    Some((
-        std::cmp::Reverse(spec.priority),
-        version_tuple(package_dir)?,
-    ))
+    Some((spec.priority, version_tuple(package_dir)?))
 }
 
 fn package_entry_dir(package_dir: &Path, spec: AppPackageSpec) -> Option<PathBuf> {
@@ -640,12 +933,17 @@ fn package_entry_dir(package_dir: &Path, spec: AppPackageSpec) -> Option<PathBuf
 }
 
 fn executable_in_dir(dir: &Path) -> Option<PathBuf> {
-    let names = package_spec_from_path(dir)
-        .map(|spec| spec.executable_names)
-        .unwrap_or(STANDALONE_CODEX_EXECUTABLES);
+    let names: &[&str] = if let Some(spec) = package_spec_from_path(dir) {
+        spec.executable_names
+    } else {
+        #[cfg(target_os = "linux")]
+        { LINUX_CODEX_EXECUTABLES }
+        #[cfg(not(target_os = "linux"))]
+        { STANDALONE_CODEX_EXECUTABLES }
+    };
     for name in names {
         let candidate = dir.join(name);
-        if candidate.exists() {
+        if candidate.is_file() {
             return Some(candidate);
         }
     }
@@ -663,9 +961,14 @@ fn codex_package_parts(package_name: &str) -> Option<(AppPackageSpec, &str, &str
         let Some((version, rest)) = rest.split_once('_') else {
             continue;
         };
-        let Some((_, publisher_id)) = rest.rsplit_once("__") else {
+        // MSIX full name 的 resource id 可能为 `~`，例如
+        // `Name_1.2.3.0_neutral_~_publisher`; 也兼容无 resource id 时的 `x64__publisher`。
+        let Some((_, publisher_id)) = rest.rsplit_once('_') else {
             continue;
         };
+        if publisher_id.is_empty() {
+            continue;
+        }
         return Some((*spec, version, publisher_id));
     }
     None
@@ -677,4 +980,105 @@ fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'
     }
     let (head, rest) = value.split_at(prefix.len());
     head.eq_ignore_ascii_case(prefix).then_some(rest)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::resolve_saved_store_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn saved_store_path_prefers_current_registered_package() {
+        let saved = PathBuf::from(r"C:\old\app");
+        let current = PathBuf::from(r"C:\new\app");
+        assert_eq!(
+            resolve_saved_store_path(saved, Ok(Some(current.clone()))),
+            current
+        );
+    }
+
+    #[test]
+    fn saved_store_path_falls_back_when_registration_is_unavailable() {
+        let saved = PathBuf::from(r"C:\old\app");
+        assert_eq!(resolve_saved_store_path(saved.clone(), Ok(None)), saved);
+        assert_eq!(
+            resolve_saved_store_path(saved.clone(), Err(anyhow::anyhow!("query failed"))),
+            saved
+        );
+    }
+}
+
+#[cfg(test)]
+mod cli_path_tests {
+    use super::{find_desktop_managed_codex_cli_from_var, is_windows_store_cli_path};
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    fn touch(path: &Path, ago_secs: u64) {
+        let file = std::fs::File::options().append(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(ago_secs))
+            .unwrap();
+    }
+
+    /// #2028：桌面版把 CLI 维护在 bin\<哈希>\ 下，哈希目录随更新变化，
+    /// 解析必须挑含 codex.exe 的最新子目录，跳过只放辅助工具的目录。
+    #[test]
+    fn picks_newest_hash_dir_containing_codex_exe() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("OpenAI").join("Codex").join("bin");
+        let old = bin.join("aaa111");
+        let new = bin.join("bbb222");
+        let rg_only = bin.join("ccc333");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&rg_only).unwrap();
+        std::fs::write(old.join("codex.exe"), "old").unwrap();
+        std::fs::write(new.join("codex.exe"), "new").unwrap();
+        std::fs::write(rg_only.join("rg.exe"), "rg").unwrap();
+        touch(&old.join("codex.exe"), 10_000);
+        touch(&new.join("codex.exe"), 60);
+        touch(&rg_only.join("rg.exe"), 1);
+
+        let found = find_desktop_managed_codex_cli_from_var(Some(temp.path()));
+        assert_eq!(found.as_deref(), Some(new.join("codex.exe").as_path()));
+    }
+
+    #[test]
+    fn flat_bin_layout_is_still_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("OpenAI").join("Codex").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex.exe"), "flat").unwrap();
+
+        let found = find_desktop_managed_codex_cli_from_var(Some(temp.path()));
+        assert_eq!(found.as_deref(), Some(bin.join("codex.exe").as_path()));
+    }
+
+    #[test]
+    fn missing_bin_directory_returns_none() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_desktop_managed_codex_cli_from_var(Some(temp.path())),
+            None
+        );
+        assert_eq!(find_desktop_managed_codex_cli_from_var(None), None);
+    }
+
+    #[test]
+    fn detects_windows_store_paths_across_separators_and_cases() {
+        assert!(is_windows_store_cli_path(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0_x64__p\app\resources\codex.exe"
+        ));
+        assert!(is_windows_store_cli_path(
+            "c:/program files/windowsapps/someapp/app/codex.exe"
+        ));
+        // 桌面版维护的 bin 目录 / macOS 内置路径 / 裸命令名都不能误伤
+        assert!(!is_windows_store_cli_path(
+            r"C:\Users\a\AppData\Local\OpenAI\Codex\bin\abc123\codex.exe"
+        ));
+        assert!(!is_windows_store_cli_path(
+            "/Applications/ChatGPT.app/Contents/Resources/codex"
+        ));
+        assert!(!is_windows_store_cli_path("codex"));
+    }
 }
