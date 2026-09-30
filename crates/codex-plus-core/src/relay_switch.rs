@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::Context;
@@ -24,8 +25,14 @@ pub fn switch_relay_profile_in_home(
     if !selected_settings.relay_profiles_enabled {
         anyhow::bail!("供应商配置总开关已关闭，未写入 config.toml / auth.json。");
     }
+    crate::codex_app_state::capture_app_state_snapshot_nonfatal(home, "relay_switch.before");
 
-    let original_settings = store.load().unwrap_or_default();
+    // 读不到当前设置时不要用默认值继续：回滚分支会把「仅剩默认供应商」写回磁盘，
+    // 这正是供应商列表被清空的成因。读失败直接中止切换，保住原文件。
+    let original_settings = store
+        .load()
+        .context("读取当前供应商设置失败，已中止切换以免覆盖用户配置")?;
+    let live_snapshot = LiveFilesSnapshot::capture(home).context("读取当前 Codex 实时配置失败")?;
     if !previous_active_relay_id.trim().is_empty()
         && previous_active_relay_id != selected_settings.active_relay_id
     {
@@ -38,11 +45,72 @@ pub fn switch_relay_profile_in_home(
     let selected_settings = store.load().context("读取供应商设置失败")?;
 
     match apply_selected_relay_profile(home, &selected_settings) {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            crate::codex_app_state::sync_app_state_after_provider_switch_nonfatal(
+                home,
+                "relay_switch.after",
+            );
+            Ok(result)
+        }
         Err(error) => {
-            let _ = store.save(&original_settings);
+            let settings_restore_error = store.save(&original_settings).err();
+            let live_restore_error = live_snapshot.restore(home).err();
+            if settings_restore_error.is_some() || live_restore_error.is_some() {
+                anyhow::bail!(
+                    "切换供应商失败：{error}；同时回滚配置失败：settings.json={}，Codex 实时文件={}",
+                    settings_restore_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "ok".to_string()),
+                    live_restore_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "ok".to_string())
+                );
+            }
             Err(error)
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LiveFilesSnapshot {
+    config: Option<Vec<u8>>,
+    auth: Option<Vec<u8>>,
+}
+
+impl LiveFilesSnapshot {
+    fn capture(home: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            config: read_optional_bytes(&home.join("config.toml"))?,
+            auth: read_optional_bytes(&home.join("auth.json"))?,
+        })
+    }
+
+    fn restore(&self, home: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(home)?;
+        restore_optional_file(&home.join("config.toml"), self.config.as_deref())
+            .context("恢复 config.toml 失败")?;
+        restore_optional_file(&home.join("auth.json"), self.auth.as_deref())
+            .context("恢复 auth.json 失败")?;
+        Ok(())
+    }
+}
+
+fn read_optional_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn restore_optional_file(path: &Path, contents: Option<&[u8]>) -> anyhow::Result<()> {
+    match contents {
+        Some(contents) => crate::settings::atomic_write(path, contents).map_err(Into::into),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        },
     }
 }
 
@@ -73,18 +141,13 @@ fn apply_selected_relay_profile(
     let result = if relay.relay_mode == RelayMode::Official && !relay.official_mix_api_key {
         let auth_contents =
             (!relay.auth_contents.trim().is_empty()).then_some(relay.auth_contents.as_str());
-        crate::relay_config::clear_relay_config_to_home_with_auth_and_computer_use_guard(
-            home,
-            auth_contents,
-            settings.computer_use_guard_enabled,
-        )?
+        crate::relay_config::clear_relay_config_to_home_with_auth(home, auth_contents)?
     } else {
         validate_switch_profile_files(&relay)?;
-        crate::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
+        crate::relay_config::apply_relay_profile_to_home_with_switch_rules(
             home,
             &relay,
             &common_config,
-            settings.computer_use_guard_enabled,
         )?
     };
     let status = relay_config_status_from_home(home);

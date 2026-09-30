@@ -2,7 +2,9 @@ use base64::Engine;
 use codex_plus_core::assets;
 use codex_plus_core::bridge::{self, BRIDGE_BINDING_NAME};
 use codex_plus_core::cdp::{
-    CdpTarget, list_targets, pick_injectable_codex_page_target, pick_page_target,
+    CdpTarget, is_avatar_overlay_page_target, is_primary_codex_page_target,
+    is_quick_chat_page_target, list_targets, pick_injectable_codex_page_target, pick_page_target,
+    validate_cdp_websocket_url,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -41,18 +43,381 @@ fn bridge_script_defines_expected_globals_and_binding() {
 }
 
 #[test]
-fn injection_script_prefixes_helper_url_without_promotional_links() {
+fn screenshot_command_uses_png_from_surface() {
+    assert_eq!(
+        bridge::capture_screenshot_params(),
+        json!({
+            "format": "png",
+            "fromSurface": true,
+            "captureBeyondViewport": false
+        })
+    );
+}
+
+#[test]
+fn injection_script_prefixes_helper_url_and_metadata() {
     let script = assets::injection_script(57321);
 
+    assert!(script.contains("!window.electronBridge"));
+    assert!(script.contains(r#"!/^app:\/\/\-\//i.test(window.location.href)"#));
     assert!(script.contains("window.__CODEX_SESSION_DELETE_HELPER__"));
     assert!(script.contains("http://127.0.0.1:57321"));
     assert!(!script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_PLUS_VERSION__"));
     assert!(script.contains(codex_plus_core::version::VERSION));
-    assert!(!script.contains("discord.gg"));
-    assert!(!script.contains("data-codex-plus-discord"));
-    assert!(!script.contains("t.me/"));
-    assert!(!script.contains("data-codex-plus-telegram"));
+    assert!(script.contains("https://discord.gg/y96kX7A76v"));
+    assert!(script.contains("data-codex-plus-discord"));
+}
+
+#[test]
+fn pet_real_mouse_settings_are_gated_to_windows_in_injected_ui() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("codexPlusIsWindowsPlatform"));
+    assert!(script.contains(r#"/\bWindows\b/i.test(navigator.userAgent || "")"#));
+    assert!(script.contains("codexPlusIsWindowsPlatform ? `<div"));
+}
+
+#[test]
+fn pet_real_mouse_script_uses_cdp_push_and_native_avatar_event() {
+    let script = assets::pet_real_mouse_script();
+
+    assert!(script.contains("avatar-overlay-computer-use-cursor-changed"));
+    assert!(script.contains("data-avatar-mascot"));
+    assert!(script.contains("nativeCursorActive"));
+    assert!(script.contains("transport: \"cdp-push\""));
+    assert!(script.contains("updateScreenPoint(point)"));
+    assert!(script.contains("localPoint.x >= bounds.left"));
+    assert!(script.contains("localPoint.y <= bounds.bottom"));
+    assert!(!script.contains("document.elementFromPoint"));
+    assert!(script.contains("if (mascotHovered)"));
+    assert!(script.contains(
+        "document.visibilityState !== \"visible\" || interaction.active() || nativeCursorActive"
+    ));
+    assert!(script.contains("sendPoint(null).catch(disableUpdates)"));
+    assert!(script.contains("void cleared.catch(disableUpdates)"));
+    assert!(script.contains("dispatcher.dispatchHostMessage({ type: eventType, point: null })"));
+    assert!(script.contains("__codexPlusPetInteraction"));
+    assert!(script.contains("setPointerCapture"));
+    assert!(script.contains("releasePointerCapture"));
+    assert!(script.contains("mascotAtPoint"));
+    assert!(script.contains("if (!ownsPointer) return"));
+    assert!(script.contains("document.addEventListener(\"pointermove\", onPointerMove, true)"));
+    assert!(script.contains("movementHoldMs = 1400"));
+    assert!(script.contains("activationRadius = 480"));
+    assert!(!script.contains("/pet/cursor-position"));
+    assert!(!script.contains("X-Codex-Plus-Pet-Token"));
+    assert!(script.contains("delete window.__codexPlusPetRealMouseLook"));
+    assert!(script.contains("retired during dispatcher setup"));
+    assert!(script.contains("nextUnsubscribe?.()"));
+    assert!(script.contains("const runtimeVersion = \"7\""));
+}
+
+#[test]
+fn pet_real_mouse_cancel_releases_pointer_capture_on_blur_and_stop() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("pet-real-mouse.js");
+    let harness_path = temp.path().join("pet-real-mouse-cancel-harness.cjs");
+    std::fs::write(&script_path, assets::pet_real_mouse_script())
+        .expect("pet real-mouse script should be written");
+    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
+    write!(
+        harness,
+        r#"
+const scriptPath = {script_path};
+const documentListeners = new Map();
+const windowListeners = new Map();
+const setCalls = [];
+const releaseCalls = [];
+
+class MockElement {{
+  closest(selector) {{ return selector === '[data-avatar-mascot="true"]' ? this : null; }}
+  getBoundingClientRect() {{ return {{ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 }}; }}
+  setPointerCapture(pointerId) {{ setCalls.push(pointerId); }}
+  releasePointerCapture(pointerId) {{ releaseCalls.push(pointerId); }}
+}}
+
+const mascot = new MockElement();
+globalThis.Element = MockElement;
+globalThis.window = globalThis;
+window.screenX = 0;
+window.screenY = 0;
+window.addEventListener = (type, listener) => windowListeners.set(type, listener);
+window.removeEventListener = (type, listener) => {{
+  if (windowListeners.get(type) === listener) windowListeners.delete(type);
+}};
+globalThis.document = {{
+  scripts: [],
+  visibilityState: "visible",
+  querySelector: (selector) => selector === '[data-avatar-mascot="true"]' ? mascot : null,
+  querySelectorAll: () => [],
+  addEventListener: (type, listener) => documentListeners.set(type, listener),
+  removeEventListener: (type, listener) => {{
+    if (documentListeners.get(type) === listener) documentListeners.delete(type);
+  }},
+}};
+globalThis.performance = {{ getEntriesByType: () => [] }};
+
+require(scriptPath);
+const runtime = window.__codexPlusPetRealMouseLook;
+const pointerEvent = (pointerId) => ({{
+  pointerId,
+  target: mascot,
+  clientX: 50,
+  clientY: 50,
+  preventDefault() {{}},
+}});
+
+documentListeners.get("pointerdown")(pointerEvent(7));
+windowListeners.get("blur")();
+const activeAfterBlur = runtime.isVisualOverrideActive();
+
+documentListeners.get("pointerdown")(pointerEvent(8));
+documentListeners.get("pointerup")(pointerEvent(9));
+const activeAfterForeignPointer = runtime.isVisualOverrideActive();
+runtime.stop();
+
+process.stdout.write(JSON.stringify({{
+  setCalls,
+  releaseCalls,
+  activeAfterBlur,
+  activeAfterForeignPointer,
+  runtimeRemoved: window.__codexPlusPetRealMouseLook == null,
+}}));
+"#,
+        script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
+            .expect("script path should serialize")
+    )
+    .expect("harness should be written");
+    drop(harness);
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should run pet pointer-cancel harness");
+    assert!(
+        output.status.success(),
+        "node harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("harness stdout should be JSON");
+    assert_eq!(result["setCalls"], json!([7, 8]));
+    assert_eq!(result["releaseCalls"], json!([7, 8]));
+    assert_eq!(result["activeAfterBlur"], false);
+    assert_eq!(result["activeAfterForeignPointer"], true);
+    assert_eq!(result["runtimeRemoved"], true);
+}
+
+#[test]
+fn pet_real_mouse_capability_probe_rejects_v1_without_explicit_v2_evidence() {
+    let probe = assets::pet_real_mouse_capability_probe_script();
+
+    assert!(probe.contains("data-avatar-mascot"));
+    assert!(probe.contains("image.naturalWidth === 1536"));
+    assert!(probe.contains("image.naturalHeight === 2288"));
+    assert!(probe.contains("getComputedStyle(element).backgroundImage"));
+    assert!(probe.contains("const image = new Image()"));
+    assert!(probe.contains("await image.decode()"));
+    assert!(probe.contains("if (!await isV2Sprite(mascot)) return false"));
+    assert!(!probe.contains("spriteVersionNumber"));
+    assert!(probe.contains("dispatchHostMessage"));
+    assert!(probe.contains("typeof value.subscribe === \"function\""));
+    assert!(!probe.contains("__codexPlusPetRealMouseLook"));
+    assert!(!probe.contains("runtimeVersion"));
+}
+
+#[test]
+fn pet_real_mouse_update_script_stops_when_runtime_capability_is_missing() {
+    let script = assets::pet_real_mouse_update_script(-125, 640);
+
+    assert!(script.contains("data-avatar-mascot"));
+    assert!(script.contains("image.naturalWidth === 1536"));
+    assert!(script.contains("image.naturalHeight === 2288"));
+    assert!(script.contains("getComputedStyle(element).backgroundImage"));
+    assert!(script.contains("await image.decode()"));
+    assert!(script.contains("__codexPlusPetV2SpriteProbe"));
+    assert!(script.contains("updateScreenPoint?.({ x: -125, y: 640 }) === true"));
+}
+
+#[test]
+fn pet_real_mouse_update_script_accepts_png_webp_and_blob_v2_but_rejects_v1() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("pet-update.js");
+    let harness_path = temp.path().join("pet-update-harness.cjs");
+    std::fs::write(&script_path, assets::pet_real_mouse_update_script(120, 240))
+        .expect("pet update script should be written");
+    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
+    write!(
+        harness,
+        r#"
+const fs = require("fs");
+const vm = require("vm");
+const script = fs.readFileSync({script_path}, "utf8");
+const sources = {{
+  pngV2: "data:image/png;base64,png-v2",
+  webpV2: "data:image/webp;base64,webp-v2",
+  webpV1: "data:image/webp;base64,webp-v1",
+  blobV2: "blob:codex-plus-pet-v2",
+  unknown: "data:image/webp;base64,unknown",
+}};
+const dimensions = new Map([
+  [sources.pngV2, [1536, 2288]],
+  [sources.webpV2, [1536, 2288]],
+  [sources.webpV1, [1536, 1872]],
+  [sources.blobV2, [1536, 2288]],
+]);
+async function run({{ image = null, source = null }} = {{}}) {{
+  let calls = 0;
+  let decodes = 0;
+  const element = {{ querySelectorAll: () => [] }};
+  const mascot = {{
+    querySelectorAll: (selector) => selector === "img" && image ? [image] : [element],
+  }};
+  class MockImage {{
+    set src(value) {{ this.source = value; }}
+    async decode() {{
+      decodes += 1;
+      const size = dimensions.get(this.source);
+      if (!size) throw new Error("unsupported image");
+      [this.naturalWidth, this.naturalHeight] = size;
+    }}
+  }}
+  const context = {{
+    document: {{ querySelector: () => mascot }},
+    getComputedStyle: (target) => ({{ backgroundImage: target === element && source ? `url("${{source}}")` : "none" }}),
+    Image: MockImage,
+    window: {{ __codexPlusPetRealMouseLook: {{ updateScreenPoint: () => {{ calls += 1; return true; }} }} }},
+  }};
+  const result = await vm.runInNewContext(script, context);
+  return {{ result, calls, decodes }};
+}}
+async function runSwitchSequence() {{
+  let calls = 0;
+  let decodes = 0;
+  let source = sources.webpV2;
+  const element = {{ querySelectorAll: () => [] }};
+  const mascot = {{ querySelectorAll: () => [element] }};
+  class MockImage {{
+    set src(value) {{ this.source = value; }}
+    async decode() {{
+      decodes += 1;
+      [this.naturalWidth, this.naturalHeight] = dimensions.get(this.source);
+    }}
+  }}
+  const context = {{
+    document: {{ querySelector: () => mascot }},
+    getComputedStyle: (target) => ({{ backgroundImage: target === element ? `url("${{source}}")` : "none" }}),
+    Image: MockImage,
+    window: {{ __codexPlusPetRealMouseLook: {{ updateScreenPoint: () => {{ calls += 1; return true; }} }} }},
+  }};
+  const first = await vm.runInNewContext(script, context);
+  const cached = await vm.runInNewContext(script, context);
+  source = sources.webpV1;
+  const afterV1Switch = await vm.runInNewContext(script, context);
+  return {{ first, cached, afterV1Switch, calls, decodes }};
+}}
+async function runDecodeRace() {{
+  let calls = 0;
+  let source = sources.webpV2;
+  let finishDecode;
+  const element = {{ querySelectorAll: () => [] }};
+  const mascot = {{ querySelectorAll: () => [element] }};
+  class MockImage {{
+    set src(value) {{ this.source = value; }}
+    async decode() {{
+      await new Promise((resolve) => {{ finishDecode = resolve; }});
+      [this.naturalWidth, this.naturalHeight] = dimensions.get(this.source);
+    }}
+  }}
+  const context = {{
+    document: {{ querySelector: () => mascot }},
+    getComputedStyle: (target) => ({{ backgroundImage: target === element ? `url("${{source}}")` : "none" }}),
+    Image: MockImage,
+    window: {{ __codexPlusPetRealMouseLook: {{ updateScreenPoint: () => {{ calls += 1; return true; }} }} }},
+  }};
+  const pending = vm.runInNewContext(script, context);
+  source = sources.webpV1;
+  finishDecode();
+  return {{ result: await pending, calls }};
+}}
+(async () => {{
+  process.stdout.write(JSON.stringify({{
+    pngV2: await run({{ source: sources.pngV2 }}),
+    webpV2: await run({{ source: sources.webpV2 }}),
+    blobV2: await run({{ source: sources.blobV2 }}),
+    webpV1: await run({{ source: sources.webpV1 }}),
+    imgV2: await run({{ image: {{ naturalWidth: 1536, naturalHeight: 2288 }} }}),
+    unknown: await run({{ source: sources.unknown }}),
+    missing: await run(),
+    switchSequence: await runSwitchSequence(),
+    decodeRace: await runDecodeRace(),
+  }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"#,
+        script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
+            .expect("script path should serialize")
+    )
+    .expect("harness should be written");
+    drop(harness);
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should run pet update harness");
+    assert!(
+        output.status.success(),
+        "node harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("harness stdout should be JSON");
+    assert_eq!(
+        cases["pngV2"],
+        json!({ "result": true, "calls": 1, "decodes": 1 })
+    );
+    assert_eq!(
+        cases["webpV2"],
+        json!({ "result": true, "calls": 1, "decodes": 1 })
+    );
+    assert_eq!(
+        cases["blobV2"],
+        json!({ "result": true, "calls": 1, "decodes": 1 })
+    );
+    assert_eq!(
+        cases["imgV2"],
+        json!({ "result": true, "calls": 1, "decodes": 0 })
+    );
+    assert_eq!(
+        cases["webpV1"],
+        json!({ "result": false, "calls": 0, "decodes": 1 })
+    );
+    assert_eq!(
+        cases["unknown"],
+        json!({ "result": false, "calls": 0, "decodes": 1 })
+    );
+    assert_eq!(
+        cases["missing"],
+        json!({ "result": false, "calls": 0, "decodes": 0 })
+    );
+    assert_eq!(
+        cases["switchSequence"],
+        json!({
+            "first": true,
+            "cached": true,
+            "afterV1Switch": false,
+            "calls": 2,
+            "decodes": 2
+        })
+    );
+    assert_eq!(cases["decodeRace"], json!({ "result": false, "calls": 0 }));
+}
+
+#[test]
+fn pet_real_mouse_stop_script_retires_existing_runtime() {
+    assert!(assets::pet_real_mouse_stop_script().contains("__codexPlusPetRealMouseLook?.stop?.()"));
 }
 
 #[test]
@@ -84,6 +449,52 @@ fn injection_script_exposes_image_overlay_config() {
 }
 
 #[test]
+fn official_login_usage_alert_setting_controls_renderer_injection() {
+    use codex_plus_core::settings::{RelayMode, RelayProfile};
+
+    let settings = |relay_mode, hide_official_usage_alert, official_mix_api_key| {
+        codex_plus_core::settings::BackendSettings {
+            active_relay_id: "official".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "official".to_string(),
+                relay_mode,
+                official_mix_api_key,
+                hide_official_usage_alert,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    };
+
+    assert!(
+        assets::injection_script_with_settings(57321, &settings(RelayMode::Official, true, false))
+            .contains("window.__CODEX_PLUS_HIDE_OFFICIAL_USAGE_ALERT__ = true;")
+    );
+    assert!(
+        assets::injection_script_with_settings(57321, &settings(RelayMode::Official, true, true))
+            .contains("window.__CODEX_PLUS_HIDE_OFFICIAL_USAGE_ALERT__ = true;")
+    );
+    assert!(
+        assets::injection_script_with_settings(57321, &settings(RelayMode::Official, false, false))
+            .contains("window.__CODEX_PLUS_HIDE_OFFICIAL_USAGE_ALERT__ = false;")
+    );
+    assert!(
+        assets::injection_script_with_settings(57321, &settings(RelayMode::PureApi, true, false))
+            .contains("window.__CODEX_PLUS_HIDE_OFFICIAL_USAGE_ALERT__ = false;")
+    );
+}
+
+#[test]
+fn usage_alert_hider_uses_sidebar_semantics_instead_of_percentage_copy() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("officialUsageAlertCards"));
+    assert!(script.contains("progress[max=\"100\"]"));
+    assert!(script.contains("dismiss usage alert|关闭使用量提醒"));
+    assert!(script.contains("codexPlusUsageAlertHidden"));
+}
+
+#[test]
 fn injection_script_installs_image_overlay_from_data_uri() {
     let script = assets::injection_script(57321);
 
@@ -93,6 +504,191 @@ fn injection_script_installs_image_overlay_from_data_uri() {
         "fit: { size: \"contain\", position: \"center center\", repeat: \"no-repeat\" }"
     ));
     assert!(script.contains("image_overlay_installed"));
+}
+
+#[test]
+fn rejects_non_loopback_cdp_websocket() {
+    let error =
+        validate_cdp_websocket_url("ws://example.com:9222/devtools/page/1", 9222).unwrap_err();
+
+    assert!(error.to_string().contains("loopback"));
+}
+
+#[test]
+fn rejects_mismatched_cdp_websocket_port() {
+    let error =
+        validate_cdp_websocket_url("ws://127.0.0.1:9333/devtools/page/1", 9222).unwrap_err();
+
+    assert!(error.to_string().contains("port"));
+}
+
+#[test]
+fn validates_ipv4_and_ipv6_loopback_cdp_websockets() {
+    validate_cdp_websocket_url("ws://127.0.0.1:9222/devtools/page/1", 9222).unwrap();
+    validate_cdp_websocket_url("ws://[::1]:9222/devtools/page/1", 9222).unwrap();
+}
+
+#[test]
+fn rejects_cdp_websocket_with_wrong_scheme_or_missing_port() {
+    assert!(validate_cdp_websocket_url("http://127.0.0.1:9222/devtools/page/1", 9222).is_err());
+    assert!(validate_cdp_websocket_url("ws://127.0.0.1/devtools/page/1", 9222).is_err());
+}
+
+#[test]
+fn injection_script_installs_dream_skin_from_backend_settings() {
+    let mut settings = codex_plus_core::settings::BackendSettings {
+        codex_app_dream_skin_enabled: true,
+        codex_app_dream_skin_paused: false,
+        codex_app_dream_skin_theme_config: codex_plus_core::settings::DreamSkinThemeConfig {
+            name: "Upstream Theme".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    settings
+        .codex_app_dream_skin_theme_config
+        .extra_fields
+        .insert(
+            "companion".to_string(),
+            serde_json::json!({
+                "dataUrl": "data:image/webp;base64,UklGRg==",
+                "width": 96,
+                "side": "right"
+            }),
+        );
+    let script = assets::injection_script_with_settings(57321, &settings);
+
+    assert!(script.contains("dreamSkinEnabled: \"codexAppDreamSkinEnabled\""));
+    assert!(script.contains("dreamSkinPaused: \"codexAppDreamSkinPaused\""));
+    assert!(script.contains("dreamSkinThemeConfig: \"codexAppDreamSkinThemeConfig\""));
+    assert!(script.contains("dreamSkinImagePath: \"codexAppDreamSkinImagePath\""));
+    assert!(!script.contains("window.__CODEX_PLUS_DREAM_SKIN_STYLES__ ="));
+    assert!(!script.contains("window.__CODEX_PLUS_DREAM_SKIN_CSS__"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_PLATFORM__"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_REVISION__"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_ART__"));
+    assert!(script.contains(if cfg!(windows) {
+        "data:image/jpeg;base64,"
+    } else {
+        "data:image/png;base64,"
+    }));
+    assert!(script.contains("codex-dream-skin-style"));
+    assert!(script.contains("codex-dream-skin-chrome"));
+    assert!(script.contains("URL.createObjectURL(new Blob"));
+    assert!(script.contains("URL.revokeObjectURL(state.artUrl)"));
+    assert!(!script.contains("/dream-skin/image?v="));
+    assert!(script.contains("window.__CODEX_PLUS_EXTERNAL_DREAM_SKIN_RUNTIME__ = true"));
+    assert!(script.contains("window.__CODEX_PLUS_CLEAR_DREAM_SKIN__?.();"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_TARGET_ENGINE__"));
+    assert!(script.contains("state.version = `codex-plus:"));
+    assert!(script.contains("state.observer?.disconnect?.()"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_PAYLOAD_SIGNATURE__"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_THEME__"));
+    assert!(script.contains("data:image/webp;base64,UklGRg=="));
+    assert!(script.contains("codex-dream-skin-companion"));
+    assert!(script.contains("removeDreamSkinCompanion"));
+    if cfg!(windows) {
+        assert!(script.contains(":root.codex-dream-skin"));
+        assert!(!script.contains("薛凯琪专属定制皮肤"));
+    }
+    assert!(script.contains(".group\\\\/home-suggestions"));
+    assert!(script.contains("--dream-skin-art"));
+    assert!(script.contains("--dream-art"));
+    assert!(script.contains("function refreshDreamSkin()"));
+    assert!(script.contains(
+        "codexPlusBackendSettingsLoaded && (!settings.dreamSkinEnabled || settings.dreamSkinPaused)"
+    ));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_RUNTIME_REVISION__"));
+    assert!(script.contains("window.__CODEX_PLUS_DREAM_SKIN_ART_SIGNATURE__"));
+    assert!(!script.contains(
+        "attributeFilter: [\"class\", \"data-theme\", \"data-appearance\", \"data-color-mode\", \"style\"]"
+    ));
+    assert!(script.contains("codexAppDreamSkinEnabled"));
+    assert!(script.contains("codexAppDreamSkinPaused"));
+    assert!(script.contains("codexAppDreamSkinThemeConfig"));
+    assert!(script.contains("Upstream Theme"));
+    assert!(script.contains("codexAppDreamSkinImagePath"));
+    assert!(script.contains("const STATE_KEY = \"__CODEX_DREAM_SKIN_STATE__\""));
+    assert!(!script.contains("artDataUrl.slice(-64)"));
+    assert!(!script.contains("luckyGod:"));
+}
+
+#[test]
+fn dream_skin_live_update_script_excludes_the_full_renderer_runtime() {
+    let settings = codex_plus_core::settings::BackendSettings {
+        codex_app_dream_skin_enabled: true,
+        codex_app_dream_skin_theme_config: codex_plus_core::settings::DreamSkinThemeConfig {
+            name: "Lightweight Theme".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let probe = assets::dream_skin_live_update_probe_script();
+    let update = assets::dream_skin_live_update_script(&settings, true);
+    let metadata_only_update = assets::dream_skin_live_update_script(&settings, false);
+    let full = assets::injection_script_with_settings(57321, &settings);
+
+    assert!(probe.contains("__CODEX_PLUS_DREAM_SKIN_RUNTIME_REVISION__"));
+    assert!(probe.contains("payloadSignature"));
+    assert!(probe.contains("__CODEX_DREAM_SKIN_STATE__"));
+    assert!(probe.contains("__CODEX_GLASS_VISION_SKIN_STATE__"));
+    assert!(update.contains("Lightweight Theme"));
+    assert!(update.contains("__CODEX_PLUS_DREAM_SKIN_ART_SIGNATURE__"));
+    assert!(update.contains(if cfg!(windows) {
+        "data:image/jpeg;base64,"
+    } else {
+        "data:image/png;base64,"
+    }));
+    assert!(!metadata_only_update.contains("base64,"));
+    assert!(!update.contains("__CODEX_PLUS_SPONSOR_IMAGES__"));
+    assert!(!update.contains("__codexSessionDeleteObserver"));
+    assert!(!update.contains("function refreshDreamSkin()"));
+    assert!(metadata_only_update.len() < full.len());
+}
+
+#[test]
+fn dream_skin_style_presets_select_their_original_target_engines() {
+    for (id, expected_engine) in [
+        ("caishen-lite", "dream-skin"),
+        ("preset-midnight-aurora", "cidala-tiger"),
+        ("codex-snow-skin", "snow"),
+        ("glass-vision", "glass-vision"),
+    ] {
+        let settings = codex_plus_core::settings::BackendSettings {
+            codex_app_dream_skin_enabled: true,
+            codex_app_dream_skin_theme_config: codex_plus_core::settings::DreamSkinThemeConfig {
+                id: id.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let script = assets::dream_skin_live_update_script(&settings, true);
+
+        assert!(
+            script.contains(&format!(
+                "window.__CODEX_PLUS_DREAM_SKIN_TARGET_ENGINE__ = \"{expected_engine}\""
+            )),
+            "wrong target engine for {id}"
+        );
+        assert!(!script.contains("__DREAM_"));
+        assert!(!script.contains("__GLASS_VISION_"));
+    }
+}
+
+#[test]
+fn dream_skin_bundles_a_real_default_image() {
+    let (content_type, image) = assets::dream_skin_default_image();
+
+    if cfg!(windows) {
+        assert_eq!(content_type, "image/jpeg");
+        assert!(image.len() > 600_000);
+        assert_eq!(&image[..3], b"\xFF\xD8\xFF");
+    } else {
+        assert_eq!(content_type, "image/png");
+        assert!(image.len() > 1_000_000);
+        assert_eq!(&image[..8], b"\x89PNG\r\n\x1a\n");
+    }
 }
 
 #[test]
@@ -106,20 +702,16 @@ fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
 }
 
 #[test]
-fn injection_script_has_no_ad_fetch_runtime() {
+fn injection_script_fetches_ads_without_bridge() {
     let script = assets::injection_script(57321);
 
-    for forbidden in [
-        "directFetchCodexPlusAds",
-        "cacheBustCodexPlusAdUrl",
-        "BigPizzaV3/Ad-List",
-        "codexPlusAds",
-    ] {
-        assert!(
-            !script.contains(forbidden),
-            "found ad runtime marker: {forbidden}"
-        );
-    }
+    assert!(script.contains("directFetchCodexPlusAds"));
+    assert!(script.contains("cacheBustCodexPlusAdUrl"));
+    assert!(script.contains("Date.now()"));
+    assert!(script.contains("BigPizzaV3/Ad-List"));
+    assert!(
+        !script.contains("codexPlusAds = normalizeCodexPlusAds(await postJson(\"/ads\", {}));")
+    );
 }
 
 #[test]
@@ -229,6 +821,13 @@ fn stepwise_exposes_manual_refresh_without_refreshing_busy_chats() {
 }
 
 #[test]
+fn stepwise_opens_manager_as_transient_window() {
+    let script = assets::stepwise_script();
+
+    assert!(script.contains("bridgeCall(\"/manager/open-transient\", {})"));
+}
+
+#[test]
 fn injection_script_defers_backend_mapped_toggles_until_settings_load() {
     let script = assets::injection_script(57321);
 
@@ -266,12 +865,12 @@ fn injection_script_skips_plugin_patch_work_in_relay_mode() {
 }
 
 #[test]
-fn injection_script_disables_plugin_auto_expand_in_relay_mode() {
+fn injection_script_omits_plugin_auto_expand() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("settings.pluginAutoExpand = false"));
-    assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
-    assert!(script.contains("if (!codexPlusSettings().pluginAutoExpand) return"));
+    assert!(!script.contains("pluginAutoExpand"));
+    assert!(!script.contains("codexPluginAutoExpand"));
+    assert!(!script.contains("plugin_auto_expand"));
 }
 
 #[test]
@@ -356,7 +955,7 @@ fn injection_script_does_not_unlock_disabled_plugin_install_buttons() {
 fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"15\""));
     assert!(!script.contains("function pluginMarketplaceAliasForName"));
     assert!(
         !script.contains("if (name === \"openai-bundled\") return \"codex-plus-openai-bundled\"")
@@ -368,9 +967,10 @@ fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"15\""));
     assert!(script.contains("isCodexPluginBuildFlavorFilter"));
     assert!(script.contains("source.includes(\"!u(e.marketplaceName)||e.marketplaceName===r\")"));
+    assert!(script.contains("source.includes(\"!Eu(e.marketplaceName)||e.marketplaceName===n\")"));
     assert!(script.contains("source.includes(\"!t.includes(e.name)\")"));
     assert!(!script.contains("if (!source.includes(\"marketplaceName\")) return false"));
     assert!(!script.contains("if (!source.includes(\"name\")) return false"));
@@ -380,7 +980,7 @@ fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"15\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
     assert!(script.contains("installPluginMarketplaceBridgePatch"));
     assert!(script.contains("installPluginBuildFlavorFilterPatch"));
@@ -400,13 +1000,21 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("message.type === \"fetch\""));
     assert!(script.contains("data?.type === \"fetch-response\""));
     assert!(script.contains("__codexPluginMarketplaceFetchRequestIds"));
-    assert!(script.contains("const nextKinds = Array.isArray(next.marketplaceKinds)"));
+    assert!(script.contains("__codexPluginMarketplaceFetchRequestProfiles"));
+    assert!(script.contains("__codexPluginMarketplaceRequestProfiles"));
+    assert!(script.contains("pluginMarketplaceRequestProfile"));
+    assert!(script.contains("remoteOnlyPluginMarketplaceFallbackResult"));
+    assert!(script.contains("let nextKinds = Array.isArray(next.marketplaceKinds)"));
+    assert!(script.contains("if (!nextKinds.includes(\"local\")) nextKinds.push(\"local\")"));
     assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
     assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds))"));
+    assert!(script.contains("codexPluginBroadCatalogKindsFromVersion = \"26.803.0\""));
+    assert!(script.contains("broadCatalogPreserved: true"));
     assert!(script.contains("patchPluginMarketplaceResult"));
     assert!(script.contains("__CODEX_PLUS_PLUGIN_MARKETPLACES__"));
     assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
     assert!(script.contains("plugin_marketplace_local_merged"));
+    assert!(script.contains("plugin_marketplace_remote_auth_fallback"));
     assert!(script.contains("cloned.marketplaceName = marketplaceName"));
     assert!(script.contains("cloned.marketplacePath = marketplaceName"));
     assert!(script.contains("restorePluginMarketplaceName"));
@@ -458,6 +1066,172 @@ fn injection_script_logs_marketplace_grouping_diagnostics() {
     assert!(script.contains("marketplaces: result.marketplaces.map"));
     assert!(script.contains("pluginMarketplaceCounts"));
     assert!(script.contains("remoteMarketplaceName"));
+}
+
+#[test]
+fn injection_script_recovers_plugin_search_from_remote_auth_errors() {
+    let cases = run_plugin_marketplace_search_contract_harness();
+
+    assert_eq!(cases["initialKinds"], json!(["local", "vertical"]));
+    assert_eq!(cases["latestBroadOmittedHasKinds"], false);
+    assert_eq!(cases["latestBroadOmittedKinds"], serde_json::Value::Null);
+    assert_eq!(cases["latestBroadNullHasKinds"], true);
+    assert_eq!(cases["latestBroadNullKinds"], serde_json::Value::Null);
+    assert_eq!(cases["latestExplicitKinds"], json!(["local", "vertical"]));
+    assert_eq!(cases["searchKinds"], json!(["created-by-me-remote"]));
+    assert_eq!(cases["searchCwds"], serde_json::Value::Null);
+    assert_eq!(cases["searchRemoteOnly"], true);
+    assert_eq!(cases["responsePatched"], true);
+    assert_eq!(cases["responseHasError"], false);
+    assert_eq!(cases["fallbackMarketplaceNames"], json!([]));
+    assert_eq!(cases["fallbackPluginNames"], json!([]));
+    assert_eq!(cases["fallbackFeaturedPluginIds"], json!([]));
+    assert_eq!(cases["fallbackMarketplaceLoadErrors"], json!([]));
+    assert_eq!(cases["remoteUnavailable"], true);
+    assert_eq!(cases["subsequentKinds"], json!(["created-by-me-remote"]));
+    assert_eq!(cases["subsequentCwds"], serde_json::Value::Null);
+    assert_eq!(
+        cases["generalAfterFallbackKinds"],
+        json!(["local", "vertical"])
+    );
+    assert_eq!(
+        cases["latestBroadAfterFallbackKinds"],
+        json!(["local", "vertical"])
+    );
+    assert_eq!(cases["generalAfterFallbackCwds"], json!(["C:/workspace"]));
+    assert_eq!(
+        cases["localFallbackMarketplaceNames"],
+        json!(["fixture-local"])
+    );
+    assert_eq!(cases["localFallbackPluginNames"], json!(["alpha"]));
+    assert_eq!(cases["chatGptKinds"], json!(["created-by-me-remote"]));
+    assert_eq!(cases["unrelatedErrorMatched"], false);
+}
+
+fn run_plugin_marketplace_search_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("plugin-marketplace-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(57321))
+        .expect("injection script should be written");
+    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
+    write!(
+        harness,
+        r#"
+const scriptPath = {script_path};
+const store = new Map();
+function node() {{
+  return {{
+    appendChild() {{}}, prepend() {{}}, remove() {{}}, setAttribute() {{}}, removeAttribute() {{}},
+    addEventListener() {{}}, querySelector() {{ return null; }}, querySelectorAll() {{ return []; }},
+    closest() {{ return null; }},
+    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }},
+    dataset: {{}}, style: {{}}, children: [], isConnected: true, textContent: "", innerHTML: "",
+  }};
+}}
+globalThis.window = globalThis;
+window.__CODEX_PLUS_TEST_PLUGIN_MARKETPLACE__ = true;
+window.addEventListener = () => {{}};
+window.removeEventListener = () => {{}};
+window.dispatchEvent = () => true;
+globalThis.document = {{
+  scripts: [], documentElement: node(), body: node(), createElement: () => node(),
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+  addEventListener() {{}}, removeEventListener() {{}},
+}};
+globalThis.localStorage = {{
+  getItem: (key) => store.has(key) ? store.get(key) : null,
+  setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key),
+}};
+globalThis.sessionStorage = globalThis.localStorage;
+globalThis.location = {{ href: "https://codex.test/index.html", pathname: "/index.html", search: "", hash: "" }};
+window.location = globalThis.location;
+globalThis.navigator = {{ userAgent: "node-test", sendBeacon: () => false }};
+globalThis.performance = {{ getEntriesByType: () => [] }};
+globalThis.fetch = async () => ({{ ok: true, json: async () => ({{}}) }});
+require(scriptPath);
+window.__CODEX_PLUS_PLUGIN_MARKETPLACES__ = [{{
+  name: "fixture-local",
+  displayName: "Fixture Local",
+  path: "C:/fixture/marketplace.json",
+  plugins: [{{ id: "alpha@fixture-local", name: "alpha", marketplaceName: "fixture-local" }}],
+}}];
+const api = window.__codexPlusPluginMarketplaceTest;
+api.reset();
+const initial = api.patchRequestParams("list-plugins", {{ cwds: ["C:/workspace"] }});
+api.setCodexAppVersion("26.803.41515");
+const latestBroadOmitted = api.patchRequestParams("list-plugins", {{ cwds: ["C:/workspace"] }});
+const latestBroadNull = api.patchRequestParams("list-plugins", {{ cwds: ["C:/workspace"], marketplaceKinds: null }});
+const latestExplicit = api.patchRequestParams("list-plugins", {{ marketplaceKinds: ["local"] }});
+api.setCodexAppVersion("");
+const searchMessage = api.patchRequestMessage({{
+  type: "mcp-request",
+  request: {{
+    id: "search-1",
+    method: "vscode://codex/list-plugins",
+    params: {{ marketplaceKinds: ["created-by-me-remote"] }},
+  }},
+}});
+const remoteAuthMessage = "list remote plugin catalog: chatgpt authentication required for remote plugin catalog; api key auth is not supported";
+const response = {{
+  type: "mcp-response",
+  message: {{ id: "search-1", error: {{ code: -32600, message: remoteAuthMessage }} }},
+}};
+const responsePatched = api.patchResponseData(response);
+const subsequent = api.patchRequestParams("list-plugins", {{ marketplaceKinds: ["created-by-me-remote"] }});
+const generalAfterFallback = api.patchRequestParams("list-plugins", {{ marketplaceKinds: ["created-by-me-remote", "local", "vertical"] }});
+api.setCodexAppVersion("26.803.41515");
+const latestBroadAfterFallback = api.patchRequestParams("list-plugins", {{ cwds: ["C:/workspace"] }});
+const fallbackMarketplaces = response.message.result?.marketplaces || [];
+const localFallbackMarketplaces = api.localFallback().marketplaces || [];
+const remoteUnavailable = api.remoteCatalogUnavailable();
+api.reset();
+const chatGpt = api.patchRequestParams("list-plugins", {{ marketplaceKinds: ["created-by-me-remote"] }});
+const cases = {{
+  initialKinds: initial.marketplaceKinds,
+  latestBroadOmittedHasKinds: Object.prototype.hasOwnProperty.call(latestBroadOmitted, "marketplaceKinds"),
+  latestBroadOmittedKinds: latestBroadOmitted.marketplaceKinds ?? null,
+  latestBroadNullHasKinds: Object.prototype.hasOwnProperty.call(latestBroadNull, "marketplaceKinds"),
+  latestBroadNullKinds: latestBroadNull.marketplaceKinds,
+  latestExplicitKinds: latestExplicit.marketplaceKinds,
+  searchKinds: searchMessage.request.params.marketplaceKinds,
+  searchCwds: searchMessage.request.params.cwds ?? null,
+  searchRemoteOnly: api.requestProfile({{ marketplaceKinds: ["created-by-me-remote"] }}).remoteOnly,
+  responsePatched,
+  responseHasError: Object.prototype.hasOwnProperty.call(response.message, "error"),
+  fallbackMarketplaceNames: fallbackMarketplaces.map((marketplace) => marketplace.name),
+  fallbackPluginNames: fallbackMarketplaces.flatMap((marketplace) => marketplace.plugins || []).map((plugin) => plugin.name),
+  fallbackFeaturedPluginIds: response.message.result?.featuredPluginIds || [],
+  fallbackMarketplaceLoadErrors: response.message.result?.marketplaceLoadErrors || [],
+  remoteUnavailable,
+  subsequentKinds: subsequent.marketplaceKinds,
+  subsequentCwds: subsequent.cwds ?? null,
+  generalAfterFallbackKinds: generalAfterFallback.marketplaceKinds,
+  generalAfterFallbackCwds: generalAfterFallback.cwds,
+  latestBroadAfterFallbackKinds: latestBroadAfterFallback.marketplaceKinds,
+  localFallbackMarketplaceNames: localFallbackMarketplaces.map((marketplace) => marketplace.name),
+  localFallbackPluginNames: localFallbackMarketplaces.flatMap((marketplace) => marketplace.plugins || []).map((plugin) => plugin.name),
+  chatGptKinds: chatGpt.marketplaceKinds,
+  unrelatedErrorMatched: api.remoteAuthError({{ message: "network unavailable" }}),
+}};
+process.stdout.write(JSON.stringify(cases));
+"#,
+        script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
+            .expect("script path should serialize")
+    )
+    .expect("harness should be written");
+
+    let output = std::process::Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should execute plugin marketplace harness");
+    assert!(
+        output.status.success(),
+        "plugin marketplace harness failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .expect("plugin marketplace harness output should be JSON")
 }
 
 #[test]
@@ -529,6 +1303,188 @@ fn injection_script_keeps_session_action_buttons_in_pr_style() {
 }
 
 #[test]
+fn injection_script_activates_session_delete_once_per_click() {
+    let script = assets::injection_script(57321);
+    let delegated_delete = script
+        .split_once("function installDeleteButtonEventDelegation()")
+        .expect("delete event delegation should exist")
+        .1
+        .split_once("function actionGroupFromRow")
+        .expect("delete event delegation should end before action group helpers")
+        .0;
+    let action_button_events = script
+        .split_once("function installActionButtonEvents")
+        .expect("action button event setup should exist")
+        .1
+        .split_once("function installMoreButtonEvents")
+        .expect("action button setup should end before more button setup")
+        .0;
+
+    assert!(delegated_delete.contains("document.addEventListener(\"click\", handler, true);"));
+    assert!(!delegated_delete.contains("document.addEventListener(\"pointerup\", handler, true);"));
+    assert!(
+        !action_button_events.contains("button.addEventListener(\"pointerup\", onActivate, true);")
+    );
+    assert!(action_button_events.contains("button.addEventListener(\"click\", (event) => {"));
+}
+
+#[test]
+fn injection_script_refreshes_sidebar_after_session_undo() {
+    let script = assets::injection_script(57321);
+    let refresh = script
+        .split_once("async function refreshRecentConversationsForHost()")
+        .expect("recent conversation refresh helper should exist")
+        .1
+        .split_once("function refreshAfterProjectMove")
+        .expect("refresh helper should end before project move refresh")
+        .0;
+    let toast = script
+        .split_once("function showToast(message, undoToken)")
+        .expect("undo toast should exist")
+        .1
+        .split_once("function upstreamWorktreeField")
+        .expect("undo toast should end before worktree helpers")
+        .0;
+
+    assert!(refresh.contains("loadOptionalCodexAppModule(\"app-server-manager-signals-\")"));
+    assert!(!refresh.contains("app-server-manager-signals-C1h8B-R-.js"));
+    assert!(toast.contains("const refreshed = await refreshRecentConversationsForHost();"));
+    assert!(toast.contains("if (!refreshed) window.location.reload();"));
+}
+
+#[test]
+fn injection_script_guards_temporary_new_thread_ids_before_delete() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("function isClientNewThreadId(value)"));
+    assert!(script.contains("function normalizedCodexThreadUuid(value)"));
+    assert!(script.contains("function reactConversationIdFromRow(row)"));
+    assert!(script.contains("__reactFiber$"));
+    assert!(script.contains("props?.conversationId"));
+    assert!(!script.contains("props?.threadId || props?.sessionId"));
+    assert!(script.contains("|| /(?:^|[=/])(?:local:)?client-new-thread:/i.test(href)"));
+    assert!(script.contains(
+        "? canonicalHrefId || (!hrefIsTemporary ? reactConversationIdFromRow(row) : \"\")"
+    ));
+    assert!(script.contains("const openDeleteConfirm = (event) => openDeleteConfirmForRow(row, deleteButton, sessionRefFromRow(row), event)"));
+    assert!(script.contains("会话仍在同步，请稍后重试"));
+    assert!(script.contains("attributeFilter: [\"data-app-action-sidebar-thread-id\", \"href\"]"));
+
+    let cases = run_session_ref_contract_harness();
+    assert_eq!(
+        cases["canonicalAttribute"],
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(
+        cases["canonicalHref"],
+        "22222222-2222-4222-8222-222222222222"
+    );
+    assert_eq!(
+        cases["conversationId"],
+        "33333333-3333-4333-8333-333333333333"
+    );
+    assert_eq!(cases["unrelatedIds"], "");
+    assert_eq!(cases["temporaryHref"], "");
+}
+
+fn run_session_ref_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("session-ref-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(57321))
+        .expect("injection script should be written");
+    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
+    write!(
+        harness,
+        r#"
+const scriptPath = {script_path};
+function node() {{
+  return {{
+    appendChild() {{}}, prepend() {{}}, remove() {{}}, setAttribute() {{}}, removeAttribute() {{}},
+    addEventListener() {{}}, querySelector() {{ return null; }}, querySelectorAll() {{ return []; }},
+    closest() {{ return null; }}, getAttribute() {{ return null; }},
+    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }},
+    dataset: {{}}, style: {{}}, children: [], isConnected: true, textContent: "", innerHTML: "",
+  }};
+}}
+globalThis.window = globalThis;
+window.__CODEX_PLUS_TEST_SESSION_REF__ = true;
+window.addEventListener = () => {{}};
+window.removeEventListener = () => {{}};
+window.dispatchEvent = () => true;
+globalThis.MutationObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.ResizeObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.IntersectionObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+globalThis.setInterval = () => 0;
+globalThis.clearInterval = () => {{}};
+globalThis.document = {{
+  scripts: [], documentElement: node(), body: node(), createElement: () => node(),
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+  addEventListener() {{}}, removeEventListener() {{}},
+}};
+globalThis.localStorage = {{ getItem: () => null, setItem() {{}}, removeItem() {{}} }};
+globalThis.sessionStorage = globalThis.localStorage;
+globalThis.location = {{ href: "https://codex.test/index.html", pathname: "/index.html", search: "", hash: "" }};
+window.location = globalThis.location;
+globalThis.navigator = {{ userAgent: "node-test", sendBeacon: () => false }};
+globalThis.performance = {{ getEntriesByType: () => [] }};
+globalThis.fetch = async () => ({{ ok: true, json: async () => ({{}}) }});
+require(scriptPath);
+
+const api = window.__codexPlusSessionRefTest;
+const placeholder = "local:client-new-thread:fixture";
+const row = (attributes, props = null) => {{
+  const value = {{
+    getAttribute: (name) => attributes[name] || null,
+    querySelector: () => null,
+    textContent: "Fixture",
+  }};
+  if (props) value.__reactFiber$fixture = {{ pendingProps: props, memoizedProps: null, return: null }};
+  return value;
+}};
+const sessionId = (value) => api.fromRow(value).session_id;
+const cases = {{
+  canonicalAttribute: sessionId(row({{ "data-app-action-sidebar-thread-id": "11111111-1111-4111-8111-111111111111" }})),
+  canonicalHref: sessionId(row({{
+    "data-app-action-sidebar-thread-id": placeholder,
+    href: "/thread/22222222-2222-4222-8222-222222222222",
+  }})),
+  conversationId: sessionId(row(
+    {{ "data-app-action-sidebar-thread-id": placeholder }},
+    {{ conversationId: "33333333-3333-4333-8333-333333333333" }},
+  )),
+  unrelatedIds: sessionId(row(
+    {{ "data-app-action-sidebar-thread-id": placeholder }},
+    {{ threadId: "44444444-4444-4444-8444-444444444444", sessionId: "55555555-5555-4555-8555-555555555555" }},
+  )),
+  temporaryHref: sessionId(row(
+    {{ "data-app-action-sidebar-thread-id": placeholder, href: "/thread/client-new-thread:fixture" }},
+    {{ conversationId: "66666666-6666-4666-8666-666666666666" }},
+  )),
+}};
+process.stdout.write(JSON.stringify(cases));
+process.exit(0);
+"#,
+        script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
+            .expect("script path should serialize")
+    )
+    .expect("harness should be written");
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should execute session reference harness");
+    assert!(
+        output.status.success(),
+        "session reference harness failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("session reference harness output should be JSON")
+}
+
+#[test]
 fn injection_script_moves_export_and_project_move_into_more_menu() {
     let script = assets::injection_script(57321).replace("\r\n", "\n");
 
@@ -579,7 +1535,13 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("patchModelArray"));
     assert!(script.contains("patchStatsigModelDynamicConfig"));
     assert!(script.contains("patchModelJsonResponse"));
+    assert!(script.contains("modelJsonResponseLooksPatchable"));
     assert!(script.contains("installAppServerModelRequestPatch"));
+    assert!(script.contains("loadAppServerRequestCandidates"));
+    assert!(script.contains("appServerFallbackAssetUrls"));
+    assert!(script.contains("collectAppServerRequestCandidatesFromModule"));
+    assert!(script.contains("codexAppServerModelRequestPatchVersion = \"5\""));
+
     assert!(script.contains("list-models-for-host"));
     assert!(script.contains("appServerModelRequestMethod"));
     assert!(script.contains("send-cli-request-for-host"));
@@ -589,8 +1551,14 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
     assert!(script.contains("modelWhitelistUnlock"));
-    assert!(script.contains("isWorkspaceChromeNode"));
+    assert!(!script.contains("|| settingsResp.relayProfiles[0]"));
     assert!(script.contains("refreshCodexModelWhitelistFromScan"));
+    assert!(script.contains("codexPlusModelListRequestIds.size === 0"));
+    assert!(!script.contains("function patchReactModelState"));
+    assert!(!script.contains("function patchObjectGraphForModels"));
+    assert!(!script.contains("window.dispatchEvent = function patchedCodexPlusDispatchEvent"));
+    assert!(script.contains("String(name) === \"107580212\""));
+    assert!(script.contains("window.addEventListener(\"codex-message-from-view\""));
     assert!(!script.contains("querySelectorAll(\"button, [role='menu']"));
 }
 
@@ -607,6 +1575,9 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("codexServiceTierSupportedFastModels"));
     assert!(script.contains("\"gpt-5.4\""));
     assert!(script.contains("\"gpt-5.5\""));
+    assert!(script.contains("\"gpt-5.6-sol\""));
+    assert!(script.contains("\"gpt-5.6-terra\""));
+    assert!(script.contains("\"gpt-5.6-luna\""));
     assert!(script.contains("codexServiceTierFastSupportedForModel"));
     assert!(script.contains("codexServiceTierModelForRequest"));
     assert!(script.contains("codexServiceTierMaybeLoadModelCatalog"));
@@ -657,12 +1628,28 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("codexServiceTierBadgeWired"));
     assert!(script.contains("setAttribute(\"role\", \"button\")"));
     assert!(script.contains("setAttribute(\"tabindex\", \"0\")"));
+    assert!(script.contains("继承 Codex 默认设置"));
     assert!(script.contains("继承 config.toml"));
+    assert!(script.contains("serviceTierInheritSourceLabel"));
+    assert!(script.contains("resolveInheritedServiceTier"));
+    assert!(script.contains("getConfigTomlServiceTier"));
+    assert!(script.contains("catalog.service_tier"));
     assert!(script.contains("service_tier=\\\"priority\\\""));
     assert!(script.contains("Fast 仅支持"));
     assert!(script.contains("当前 thread"));
     assert!(script.contains("standard"));
     assert!(script.contains("fast"));
+    assert!(script.contains("[\"setting-storage-\", \"app-initial-\"]"));
+    assert!(script.contains("[\"setting-storage-\", \"vscode-api-\", \"app-initial-\"]"));
+    assert!(script.contains("[\"vscode-api-\", \"app-initial-\"]"));
+    assert!(script.contains("codexSettingStorageFromModule"));
+    assert!(script.contains("codexStateApiFromModule"));
+    assert!(script.contains("message.type === \"fetch\""));
+    assert!(script.contains("vscode://codex/"));
+    assert!(script.contains("./(?:assets/)?"));
+    assert!(script.contains("dispatcher export unavailable"));
+    assert!(!script.contains("data-codex-max-reasoning-control"));
+    assert!(!script.contains("codexAppMaxReasoningOverride"));
 }
 
 #[test]
@@ -681,11 +1668,42 @@ fn injection_script_prompts_for_markdown_export_path_when_supported() {
 fn injection_script_discovers_vscode_api_asset_without_hardcoded_hash() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("loadCodexAppModule(\"vscode-api-\""));
+    assert!(script.contains("[\"vscode-api-\", \"app-initial-\"]"));
+    assert!(script.contains("loadCodexAppModule(assetPrefix)"));
     assert!(script.contains("codexAppAssetUrlFromScriptText"));
     assert!(script.contains("fetch(src"));
     assert!(!script.contains("vscode-api-Dc9pX2Bc.js"));
     assert!(!script.contains("import(\"./assets/vscode-api-"));
+}
+
+#[test]
+fn injection_script_discovers_app_server_request_clients_without_hardcoded_hash() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("loadAppServerRequestCandidates"));
+    assert!(script.contains("appServerFallbackAssetUrls"));
+    assert!(script.contains("[\"use-host-config-\", \"app-server-manager-signals-\"]"));
+    assert!(script.contains("loadOptionalCodexAppModule(assetPrefix)"));
+    assert!(script.contains("candidateCount: candidates.length"));
+    assert!(script.contains("discovery:"));
+    // Keep legacy lookup as first attempt, but never hardcode the old hashed filename.
+    assert!(
+        !script.contains("app-server-manager-signals-C1h8B-R-.js")
+            || script.contains("refreshRecentConversationsForHost")
+    );
+}
+
+#[test]
+fn injection_script_refreshes_sidebar_after_undo_without_stale_asset_exports() {
+    let script = assets::injection_script(57321);
+
+    assert!(script.contains("loadOptionalCodexAppModule(\"app-server-manager-signals-\")"));
+    assert!(script.contains("Object.values(signals || {}).find"));
+    assert!(script.contains("refresh-recent-conversations-for-host"));
+    assert!(script.contains("const refreshed = await refreshRecentConversationsForHost()"));
+    assert!(script.contains("if (!refreshed) window.location.reload()"));
+    assert!(!script.contains("app-server-manager-signals-C1h8B-R-.js"));
+    assert!(!script.contains("typeof signals.rn"));
 }
 
 #[test]
@@ -731,7 +1749,115 @@ fn injection_script_applies_fast_service_tier_contract() {
         serde_json::Value::Null
     );
 
+    assert_eq!(cases["inheritUnsetStatus"], "继承 Codex 默认设置：默认");
+    assert_eq!(cases["inheritFastStatus"], "继承 Codex 默认设置：fast");
+    assert_eq!(
+        cases["inheritStandardStatus"],
+        "继承 Codex 默认设置：standard"
+    );
+    assert_eq!(
+        cases["inheritConfigTomlFastStatus"],
+        "继承 config.toml：fast"
+    );
+    assert_eq!(cases["resolvedConfigTomlTier"]["configServiceTier"], "fast");
+    assert_eq!(
+        cases["resolvedConfigTomlTier"]["serviceTierSource"],
+        "config-toml"
+    );
+    assert_eq!(
+        cases["resolvedUnsetTier"]["configServiceTier"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["resolvedUnsetTier"]["serviceTierSource"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["inheritedConfigFastBlocked"]["serviceTier"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["inheritedConfigFastBlocked"]["service_tier"],
+        serde_json::Value::Null
+    );
+
     assert_eq!(cases["startConversation"]["serviceTier"], "priority");
+    assert_eq!(cases["fetchStartConversation"]["serviceTier"], "priority");
+    assert_eq!(
+        cases["fetchSendCliRequest"]["params"]["serviceTier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["fetchSendCliRequest"]["params"]["service_tier"],
+        "priority"
+    );
+    assert_eq!(cases["solFastAvailability"]["supported"], true);
+    assert_eq!(cases["solDescriptor"]["defaultReasoningEffort"], "low");
+    assert_eq!(
+        cases["solDescriptor"]["supportedReasoningEfforts"][4]["reasoningEffort"],
+        "max"
+    );
+    assert_eq!(
+        cases["solDescriptor"]["supportedReasoningEfforts"][5]["reasoningEffort"],
+        "ultra"
+    );
+    assert_eq!(cases["dispatcherFromSingleton"], true);
+    assert_eq!(cases["dispatcherFromCurrentSingleton"], true);
+    assert_eq!(cases["dispatcherFromClass"], true);
+    assert_eq!(cases["legacySettingStorage"], true);
+    assert_eq!(cases["currentSettingStorage"], true);
+    assert_eq!(cases["capabilitySettingStorage"], true);
+    assert_eq!(cases["legacyStateApi"], true);
+    assert_eq!(cases["currentStateApi"], true);
+    assert_eq!(cases["appServerParamsUnchanged"], true);
+    assert_eq!(cases["appServerSentCount"], 2);
+    assert_eq!(
+        cases["providerFromMissing"]["modelProvider"],
+        "vendor_alpha"
+    );
+    assert_eq!(cases["providerFromOpenAi"]["modelProvider"], "vendor_alpha");
+    assert_eq!(cases["providerFromOtherUnchanged"], true);
+    assert_eq!(cases["nonThreadProviderUnchanged"], true);
+    assert_eq!(
+        cases["providerWithServiceTierControlsDisabled"]["modelProvider"],
+        "vendor_alpha"
+    );
+    assert_eq!(cases["appServerProviderOverride"], "vendor_alpha");
+    assert_eq!(cases["directThreadStartedId"], "thread-mobile-direct");
+    assert_eq!(cases["nestedThreadStartedId"], "thread-mobile-nested");
+    assert_eq!(
+        cases["browserUseRouteThreadId"],
+        "thread-mobile-browser-route"
+    );
+    assert_eq!(cases["inactiveBrowserUseUnscheduled"], true);
+    assert_eq!(cases["remoteRecoveryScheduled"], true);
+    assert_eq!(cases["remoteRecoveryThreadId"], "thread-mobile-notify");
+    assert_eq!(cases["remoteRecoveryCallCountAfterSuccess"], 1);
+    assert_eq!(cases["remoteRecoveryDispatcherInstalled"], true);
+    assert_eq!(
+        cases["remoteRecoveryDispatcherThreadId"],
+        "thread-mobile-dispatcher"
+    );
+    assert_eq!(
+        cases["remoteRecoveryBrowserUseDispatcherThreadId"],
+        "thread-mobile-browser-dispatcher"
+    );
+    assert_eq!(
+        cases["remoteRecoveryOutboundRouteThreadId"],
+        "thread-mobile-browser-outbound"
+    );
+    assert_eq!(cases["remoteRecoveryListenerInstalled"], true);
+    assert_eq!(
+        cases["remoteRecoveryViewEventThreadId"],
+        "thread-mobile-view-event"
+    );
+    assert_eq!(cases["remoteRecoveryRetried"], true);
+    assert_eq!(cases["remoteRecoveryRetryAttempts"], json!([0, 1]));
+    assert_eq!(cases["missingActiveProviderUnchanged"], true);
+    assert_eq!(cases["missingActiveRecoveryUnscheduled"], true);
+    assert_eq!(cases["pureApiProviderUnchanged"], true);
+    assert_eq!(cases["pureApiRecoveryUnscheduled"], true);
+    assert_eq!(cases["pureOfficialProviderUnchanged"], true);
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -769,6 +1895,11 @@ function node() {{
 }}
 globalThis.window = globalThis;
 window.__CODEX_PLUS_TEST_SERVICE_TIER__ = true;
+const windowListeners = new Map();
+window.addEventListener = (type, listener) => windowListeners.set(type, listener);
+window.removeEventListener = (type, listener) => {{
+  if (windowListeners.get(type) === listener) windowListeners.delete(type);
+}};
 globalThis.document = {{
   scripts: [],
   documentElement: node(),
@@ -791,8 +1922,38 @@ globalThis.navigator = {{ userAgent: "node-test" }};
 globalThis.performance = {{ getEntriesByType: () => [] }};
 require(scriptPath);
 const api = window.__codexPlusServiceTierTest;
-api.setServiceTierState({{ serviceTier: "priority", fastTierValue: "priority" }});
+api.setServiceTierState({{ status: "ok", serviceTier: "priority", fastTierValue: "priority" }});
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
+
+const inheritUnsetStatus = api.statusSummary({{
+  controlMode: "inherit",
+  threadMode: "inherit",
+  defaultMode: "inherit",
+  effectiveMode: "standard",
+  effectiveServiceTier: null,
+}});
+const inheritFastStatus = api.statusSummary({{
+  controlMode: "inherit",
+  threadMode: "inherit",
+  defaultMode: "inherit",
+  effectiveMode: "fast",
+  effectiveServiceTier: "priority",
+}});
+const inheritStandardStatus = api.statusSummary({{
+  controlMode: "inherit",
+  threadMode: "inherit",
+  defaultMode: "inherit",
+  effectiveMode: "standard",
+  effectiveServiceTier: "standard",
+}});
+const inheritConfigTomlFastStatus = api.statusSummary({{
+  controlMode: "inherit",
+  threadMode: "inherit",
+  defaultMode: "inherit",
+  effectiveMode: "fast",
+  effectiveServiceTier: "fast",
+  serviceTierSource: "config-toml",
+}});
 
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
 const supportedFast = api.applyServiceTierOverride("turn/start", {{
@@ -828,15 +1989,365 @@ const startConversation = api.requestOverride({{
   threadId: "thread-12345678",
   model: "gpt-5.5",
 }});
+const fetchStartConversationEnvelope = api.requestOverride({{
+  type: "fetch",
+  url: "vscode://codex/start-conversation",
+  body: JSON.stringify({{
+    threadId: "thread-12345678",
+    model: "gpt-5.5",
+    serviceTier: null,
+  }}),
+}});
+const fetchStartConversation = JSON.parse(fetchStartConversationEnvelope.body);
+const fetchSendCliRequestEnvelope = api.requestOverride({{
+  type: "fetch",
+  url: "vscode://codex/send-cli-request-for-host",
+  body: {{
+    hostId: "local",
+    method: "thread/start",
+    params: {{
+      threadId: "thread-12345678",
+      model: "gpt-5.5",
+      service_tier: null,
+    }},
+  }},
+}});
+const fetchSendCliRequest = fetchSendCliRequestEnvelope.body;
 
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-sol",
+  default_model: "gpt-5.6-sol",
+  models: ["gpt-5.6-sol"],
+  modelMetadata: {{
+    "gpt-5.6-sol": {{
+      displayName: "GPT-5.6-Sol",
+      description: "Latest frontier agentic coding model.",
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"].map((reasoningEffort) => ({{ reasoningEffort }})),
+      additionalSpeedTiers: ["fast"],
+      serviceTiers: [{{ id: "priority", name: "Fast" }}],
+    }},
+  }},
+}});
+const solFastAvailability = api.fastAvailability("gpt-5.6-sol");
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-sol",
+  default_model: "gpt-5.6-sol",
+  models: ["gpt-5.6-sol"],
+  modelMetadata: {{
+    "gpt-5.6-sol": {{
+      displayName: "GPT-5.6-Sol",
+      description: "Latest frontier agentic coding model.",
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"].map((reasoningEffort) => ({{ reasoningEffort }})),
+    }},
+  }},
+}});
+const solDescriptor = api.modelDescriptor("gpt-5.6-sol");
+const singletonDispatcher = {{ dispatchMessage() {{}}, subscribe() {{}} }};
+const dispatcherFromSingleton = api.dispatcherFromModule({{ current: singletonDispatcher }}) === singletonDispatcher;
+const currentSingletonDispatcher = {{ dispatchMessage() {{}}, subscribe() {{}} }};
+const dispatcherFromCurrentSingleton = api.dispatcherFromModule({{
+  decoy: singletonDispatcher,
+  idt: currentSingletonDispatcher,
+}}) === currentSingletonDispatcher;
+class DispatcherClass {{
+  static instance = new DispatcherClass();
+  static getInstance() {{ return this.instance; }}
+  dispatchMessage() {{}}
+}}
+const dispatcherFromClass = api.dispatcherFromModule({{ current: DispatcherClass }}) === DispatcherClass.instance;
+const legacyGetSetting = async () => "legacy-get";
+const legacySetSetting = async () => "legacy-set";
+const legacySettingStorageValue = api.settingStorageFromModule({{
+  n: legacyGetSetting,
+  s: legacySetSetting,
+}}, "setting-storage-");
+const legacySettingStorage = legacySettingStorageValue.n === legacyGetSetting
+  && legacySettingStorageValue.s === legacySetSetting;
+const wrongCurrentGetSetting = async () => "wrong-current-get";
+const wrongCurrentSetSetting = async () => "wrong-current-set";
+const currentGetSetting = async (setting) => {{
+  const marker = "get-setting";
+  const params = {{ key: setting.key }};
+  return marker && params && "current-get";
+}};
+const currentSetSetting = async (setting, value) => {{
+  const marker = "set-setting";
+  const params = {{ key: setting.key, value }};
+  return marker && params && "current-set";
+}};
+const currentSettingStorageValue = api.settingStorageFromModule({{
+  n: wrongCurrentGetSetting,
+  s: wrongCurrentSetSetting,
+  jut: currentGetSetting,
+  Put: currentSetSetting,
+}}, "app-initial-");
+const currentSettingStorage = currentSettingStorageValue.n === currentGetSetting
+  && currentSettingStorageValue.s === currentSetSetting;
+const capabilitySettingStorageValue = api.settingStorageFromModule({{
+  randomGetter: currentGetSetting,
+  randomSetter: currentSetSetting,
+}}, "app-initial-");
+const capabilitySettingStorage = capabilitySettingStorageValue.n === currentGetSetting
+  && capabilitySettingStorageValue.s === currentSetSetting;
+const legacyStateCall = async () => "legacy-state";
+const currentStateCall = async () => "current-state";
+const legacyStateApi = api.stateApiFromModule({{
+  n: legacyStateCall,
+  qut: currentStateCall,
+}}, "vscode-api-") === legacyStateCall;
+const currentStateApi = api.stateApiFromModule({{
+  n: legacyStateCall,
+  qut: currentStateCall,
+}}, "app-initial-") === currentStateCall;
+const nativeAppServerParams = {{
+  cwd: "C:/native/work",
+  workspaceRoots: ["C:/native/work"],
+  workspaceKind: "project",
+  projectAssignment: {{ projectKind: "local", projectId: "C:/native/work" }},
+}};
+const appServerCalls = [];
+const appServerClient = {{
+  async sendRequest(method, params, options) {{
+    appServerCalls.push({{ method, params, options }});
+    return {{ ok: true }};
+  }},
+}};
+api.patchAppServerClient(appServerClient);
+
+appServerClient.sendRequest("start-conversation", nativeAppServerParams, {{ signal: "native" }}).then(async () => {{
+api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"], service_tier: "fast" }});
+const resolvedConfigTomlTier = await api.resolveInheritedServiceTier();
+api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
+const resolvedUnsetTier = await api.resolveInheritedServiceTier();
+api.setModelCatalog({{ status: "ok", model: "gpt-4.1", default_model: "gpt-4.1", models: ["gpt-4.1"] }});
+api.setThreadState({{ mode: "inherit", defaultMode: "inherit", entries: {{}} }});
+api.setServiceTierState({{ status: "ok", serviceTier: null, configServiceTier: "fast", serviceTierSource: "config-toml" }});
+const inheritedConfigFastBlocked = api.applyServiceTierOverride("turn/start", {{
+  threadId: "thread-12345678",
+  model: "gpt-4.1",
+  service_tier: null,
+}}, "");
+const appServerParamsUnchanged = appServerCalls[0]?.params === nativeAppServerParams
+  && appServerCalls[0]?.params?.workspaceKind === "project"
+  && appServerCalls[0]?.params?.cwd === "C:/native/work"
+  && appServerCalls[0]?.params?.projectAssignment?.projectId === "C:/native/work";
+api.setBackendSettings({{
+  relayProfilesEnabled: true,
+  activeRelayId: "custom-relay",
+  relayProfiles: [{{ id: "custom-relay", relayMode: "official", officialMixApiKey: true }}],
+}});
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-sol",
+  default_model: "gpt-5.6-sol",
+  model_provider: "relay-ms0ihvx9",
+  codex_model_provider: "vendor_alpha",
+  models: ["gpt-5.6-sol"],
+}});
+localStorage.setItem("codexPlusSettings", JSON.stringify({{ serviceTierControls: false }}));
+const providerFromMissing = api.applyProviderOverride("thread/start", {{ cwd: "C:/mobile" }});
+const providerFromOpenAi = api.applyProviderOverride("thread/start", {{ cwd: "C:/mobile", modelProvider: "openai" }});
+const explicitOtherProvider = {{ cwd: "C:/mobile", modelProvider: "other" }};
+const providerFromOther = api.applyProviderOverride("thread/start", explicitOtherProvider);
+const nonThreadParams = {{ cwd: "C:/mobile", modelProvider: "openai" }};
+const nonThreadProviderUnchanged = api.applyProviderOverride("turn/start", nonThreadParams) === nonThreadParams;
+const providerWithServiceTierControlsDisabled = api.requestOverride({{
+  type: "start-conversation",
+  cwd: "C:/mobile",
+  modelProvider: "openai",
+}});
+await appServerClient.sendRequest("thread/start", {{ cwd: "C:/mobile", modelProvider: "openai" }}, {{ signal: "mobile" }});
+const appServerProviderOverride = appServerCalls[1]?.params?.modelProvider;
+const directThreadStartedId = api.remoteSessionStartedThreadId({{
+  method: "thread/started",
+  params: {{ thread: {{ id: "thread-mobile-direct" }} }},
+}});
+const nestedThreadStartedId = api.remoteSessionStartedThreadId({{
+  type: "mcp-response",
+  message: {{ method: "thread/started", params: {{ thread: {{ id: "thread-mobile-nested" }} }} }},
+}});
+const browserUseRouteThreadId = api.remoteSessionStartedThreadId({{
+  type: "browser-use-session-route-capture",
+  conversationId: "thread-mobile-browser-route",
+}});
+const inactiveBrowserUseUnscheduled = api.observeRemoteSessionNotification({{
+  type: "browser-sidebar-browser-use-state",
+  conversationId: "thread-mobile-browser-inactive",
+  isActive: false,
+}}) === false;
+const remoteRecoveryCalls = [];
+const remoteRecoveryDispatcherHandlers = new Map();
+const remoteRecoveryDispatcher = {{
+  subscribe(type, callback) {{
+    remoteRecoveryDispatcherHandlers.set(type, callback);
+    return () => remoteRecoveryDispatcherHandlers.delete(type);
+  }},
+}};
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryCalls.push({{ payload, attempt }});
+  return {{ status: "synced", message: "Remote Control session catalog recovery complete" }};
+}};
+const remoteRecoveryScheduled = api.observeRemoteSessionNotification({{
+  response: {{ method: "thread/started", params: {{ thread: {{ id: "thread-mobile-notify" }} }} }},
+}});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryCallCountAfterSuccess = remoteRecoveryCalls.length;
+const remoteRecoveryDispatcherCalls = [];
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryDispatcherCalls.push({{ payload, attempt }});
+  return {{ status: "synced", message: "Remote Control session catalog recovery complete" }};
+}};
+const remoteRecoveryDispatcherInstalled = api.installRemoteSessionDispatcherSubscription(remoteRecoveryDispatcher);
+remoteRecoveryDispatcherHandlers.get("thread/started")?.({{ id: "thread-mobile-dispatcher" }});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryDispatcherThreadId = remoteRecoveryDispatcherCalls[0]?.payload?.thread_id || "";
+const remoteRecoveryBrowserUseDispatcherCalls = [];
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryBrowserUseDispatcherCalls.push({{ payload, attempt }});
+  return {{ status: "synced", message: "Remote Control session catalog recovery complete" }};
+}};
+remoteRecoveryDispatcherHandlers.get("browser-sidebar-browser-use-state")?.({{
+  conversationId: "thread-mobile-browser-dispatcher",
+  isActive: true,
+}});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryBrowserUseDispatcherThreadId = remoteRecoveryBrowserUseDispatcherCalls[0]?.payload?.thread_id || "";
+const remoteRecoveryOutboundRouteCalls = [];
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryOutboundRouteCalls.push({{ payload, attempt }});
+  return {{ status: "synced", message: "Remote Control session catalog recovery complete" }};
+}};
+const outboundDispatcherMessages = [];
+const outboundDispatcher = {{
+  __codexServiceTierOriginalDispatchMessage(type, payload) {{
+    outboundDispatcherMessages.push({{ type, payload }});
+    return true;
+  }},
+}};
+api.dispatchMessage(outboundDispatcher, "browser-use-session-route-capture", {{
+  conversationId: "thread-mobile-browser-outbound",
+}});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryOutboundRouteThreadId = remoteRecoveryOutboundRouteCalls[0]?.payload?.thread_id || "";
+const remoteRecoveryViewEventCalls = [];
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryViewEventCalls.push({{ payload, attempt }});
+  return {{ status: "synced", message: "Remote Control session catalog recovery complete" }};
+}};
+const remoteRecoveryListenerInstalled = api.installRemoteSessionRecoveryListener();
+windowListeners.get("codex-message-from-view")?.({{
+  detail: {{
+    type: "browser-use-session-route-capture",
+    conversationId: "thread-mobile-view-event",
+  }},
+}});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryViewEventThreadId = remoteRecoveryViewEventCalls[0]?.payload?.thread_id || "";
+const remoteRecoveryRetryCalls = [];
+window.__CODEX_PLUS_TEST_REMOTE_RECOVERY__ = (payload, attempt) => {{
+  remoteRecoveryRetryCalls.push({{ payload, attempt }});
+  if (attempt === 0) {{
+    return {{ status: "synced", message: "Remote Control session recovery already up to date" }};
+  }}
+  return {{ status: "synced", message: "Remote Control session recovery complete" }};
+}};
+const remoteRecoveryRetried = api.observeRemoteSessionNotification({{
+  response: {{ method: "thread/started", params: {{ thread: {{ id: "thread-mobile-retry" }} }} }},
+}});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const remoteRecoveryRetryAttempts = remoteRecoveryRetryCalls.map((call) => call.attempt);
+api.setBackendSettings({{
+  relayProfilesEnabled: true,
+  activeRelayId: "missing",
+  relayProfiles: [{{ id: "eligible", relayMode: "official", officialMixApiKey: true }}],
+}});
+const missingActiveParams = {{ cwd: "C:/mobile", modelProvider: "openai" }};
+const missingActiveProviderUnchanged = api.applyProviderOverride("thread/start", missingActiveParams) === missingActiveParams;
+const missingActiveRecoveryUnscheduled = api.observeRemoteSessionNotification({{
+  method: "thread/started",
+  params: {{ thread: {{ id: "thread-mobile-missing-active" }} }},
+}}) === false;
+api.setBackendSettings({{
+  relayProfilesEnabled: true,
+  activeRelayId: "pure-api",
+  relayProfiles: [{{ id: "pure-api", relayMode: "pureApi", officialMixApiKey: true }}],
+}});
+const pureApiParams = {{ cwd: "C:/mobile", modelProvider: "openai" }};
+const pureApiProviderUnchanged = api.applyProviderOverride("thread/start", pureApiParams) === pureApiParams;
+const pureApiRecoveryUnscheduled = api.observeRemoteSessionNotification({{
+  method: "thread/started",
+  params: {{ thread: {{ id: "thread-mobile-pure-api" }} }},
+}}) === false;
+api.setBackendSettings({{
+  relayProfilesEnabled: true,
+  activeRelayId: "official",
+  relayProfiles: [{{ id: "official", relayMode: "official", officialMixApiKey: false }}],
+}});
+const pureOfficialParams = {{ cwd: "C:/mobile", modelProvider: "openai" }};
+const pureOfficialProviderUnchanged = api.applyProviderOverride("thread/start", pureOfficialParams) === pureOfficialParams;
 process.stdout.write(JSON.stringify({{
   supportedFast,
   unsupportedModel,
   turnWithoutModel,
   turnWithoutModelDiagnosticModel,
   customInheritUnsupported,
+  inheritUnsetStatus,
+  inheritFastStatus,
+  inheritStandardStatus,
+  inheritConfigTomlFastStatus,
+  resolvedConfigTomlTier,
+  resolvedUnsetTier,
+  inheritedConfigFastBlocked,
   startConversation,
+  fetchStartConversation,
+  fetchSendCliRequest,
+  solFastAvailability,
+  solDescriptor,
+  dispatcherFromSingleton,
+  dispatcherFromCurrentSingleton,
+  dispatcherFromClass,
+  legacySettingStorage,
+  currentSettingStorage,
+  capabilitySettingStorage,
+  legacyStateApi,
+  currentStateApi,
+  appServerParamsUnchanged,
+  appServerSentCount: appServerCalls.length,
+  providerFromMissing,
+  providerFromOpenAi,
+  providerFromOtherUnchanged: providerFromOther === explicitOtherProvider,
+  nonThreadProviderUnchanged,
+  providerWithServiceTierControlsDisabled,
+  appServerProviderOverride,
+  directThreadStartedId,
+  nestedThreadStartedId,
+  browserUseRouteThreadId,
+  inactiveBrowserUseUnscheduled,
+  remoteRecoveryScheduled,
+  remoteRecoveryThreadId: remoteRecoveryCalls[0]?.payload?.thread_id || "",
+  remoteRecoveryCallCountAfterSuccess,
+  remoteRecoveryDispatcherInstalled,
+  remoteRecoveryDispatcherThreadId,
+  remoteRecoveryBrowserUseDispatcherThreadId,
+  remoteRecoveryOutboundRouteThreadId,
+  remoteRecoveryListenerInstalled,
+  remoteRecoveryViewEventThreadId,
+  remoteRecoveryRetried,
+  remoteRecoveryRetryAttempts,
+  missingActiveProviderUnchanged,
+  missingActiveRecoveryUnscheduled,
+  pureApiProviderUnchanged,
+  pureApiRecoveryUnscheduled,
+  pureOfficialProviderUnchanged,
 }}));
+}}).catch((error) => {{
+  console.error(error);
+  process.exit(1);
+}});
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
             .expect("script path should serialize")
@@ -858,6 +2369,21 @@ process.stdout.write(JSON.stringify({{
 }
 
 #[test]
+fn injection_script_leaves_new_threads_to_the_codex_app() {
+    let script = assets::injection_script(57321);
+
+    assert!(!script.contains("installCodexProjectlessNewTaskButtons"));
+    assert!(!script.contains("loadCodexAppModule(\"projectless-thread-\")"));
+    assert!(!script.contains("projectless_thread_start_overridden"));
+    assert!(!script.contains("projectless_app_server_start_overridden"));
+    assert!(!script.contains("projectless_main_window_home_route_cleared"));
+    assert!(!script.contains("hotkey-window-projectless-default-enabled"));
+    assert!(script.contains("installCodexServiceTierDispatcherPatch"));
+    assert!(script.contains("installAppServerModelRequestPatch"));
+    assert!(script.contains("originalSendRequest(method, nextParams, options)"));
+}
+
+#[test]
 fn injection_script_restores_thread_scroll_positions() {
     let script = assets::injection_script(57321);
 
@@ -872,7 +2398,7 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
     let script = assets::injection_script(57321);
 
     assert!(script.contains("installUpstreamBranchDropdownAdapter"));
-    assert!(script.contains("installUpstreamPendingWorktreeDispatcherPatch"));
+    assert!(!script.contains("installUpstreamPendingWorktreeDispatcherPatch"));
     assert!(script.contains("data-codex-upstream-branch-option"));
     assert!(script.contains("codexUpstreamBranchSelection"));
     assert!(script.contains("/upstream-worktree/defaults"));
@@ -886,7 +2412,7 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
     assert!(script.contains("readUpstreamBranchSelection"));
     assert!(script.contains("writeUpstreamBranchSelection(null)"));
     assert!(script.contains("currentProjectRepoPathFromSelectedProjectButton"));
-    assert!(script.contains("currentProjectRepoPathFromStartButton"));
+    assert!(script.contains("currentProjectContextFromStartButton"));
     assert!(script.contains("Start new chat in"));
     assert!(script.contains("codexUpstreamProjectContext"));
     assert!(script.contains("rememberStartNewChatProjectContext"));
@@ -899,11 +2425,11 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
     assert!(script.contains("data-codex-upstream-branch-selection-label"));
     assert!(script.contains("syncUpstreamBranchTriggerLabel"));
     assert!(script.contains("syncUpstreamBranchMenuSelection"));
-    assert!(script.contains("applyUpstreamPendingWorktreeOverride"));
-    assert!(script.contains("pending-worktree-create"));
+    assert!(!script.contains("applyUpstreamPendingWorktreeOverride"));
+    assert!(!script.contains("pending-worktree-create"));
     assert!(script.contains("qualifiedSourceRef"));
     assert!(script.contains("refs/remotes/${remote}/${baseBranch}"));
-    assert!(script.contains("startingState: { ...request.startingState, branchName: sourceRef }"));
+    assert!(!script.contains("startingState: { ...request.startingState, branchName: sourceRef }"));
     assert!(script.contains("data-codex-upstream-branch-check"));
     assert!(script.contains("data-codex-upstream-branch-icon"));
     assert!(script.contains("branchIconSvg"));
@@ -920,10 +2446,16 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
     assert!(script.contains("cleanupInvalidUpstreamBranchOptions"));
     assert!(script.contains("branchMenuInNewWorktreeMode"));
     assert!(script.contains("branchMenuTriggerIsBranchControl"));
-    assert!(script.contains("actual-upstream-refs-v16"));
+    assert!(script.contains("actual-upstream-refs-v17"));
     assert!(script.contains("create and checkout new branch"));
     assert!(script.contains("if (/^start in"));
     assert!(script.contains("if (!branchMenuInNewWorktreeMode(trigger))"));
+    assert!(script.contains("window.__codexUpstreamBranchDropdownObserver?.disconnect?.()"));
+    assert!(script.contains("record.addedNodes"));
+    assert!(script.contains("addedNodeContainsBranchMenu"));
+    assert!(!script.contains("new MutationObserver(schedule).observe"));
+    assert!(script.contains(r#".composer-footer button, .composer-footer [role="button"]"#));
+    assert!(!script.contains("return [...document.querySelectorAll('button')]"));
 }
 
 #[test]
@@ -941,12 +2473,12 @@ fn injection_script_prevents_switching_to_branches_used_by_other_worktrees() {
 fn injection_script_rebuilds_upstream_options_for_each_project_branch_menu() {
     let script = assets::injection_script(57321);
 
-    assert!(script.contains("currentProjectRepoPathForBranchMenu"));
-    assert!(script.contains("repoPathFromProjectLabel"));
+    assert!(!script.contains("currentProjectRepoPathForBranchMenu"));
+    assert!(!script.contains("repoPathFromProjectLabel"));
     assert!(script.contains("projectContextFromProjectLabel"));
     assert!(script.contains("upstreamBranchOptionsMatchRefs"));
     assert!(script.contains("upstreamBranchDefaultsCache = new Map()"));
-    assert!(script.contains("actual-upstream-refs-v16"));
+    assert!(script.contains("actual-upstream-refs-v17"));
 }
 
 #[test]
@@ -960,22 +2492,23 @@ fn manager_ui_exposes_pure_api_relay_mode_button() {
         std::fs::read_to_string(repo.join("apps/codex-plus-manager/src-tauri/src/lib.rs")).unwrap();
 
     assert!(source.contains("官方混入 API Key"));
+    assert!(source.contains("关闭官方低额度提示"));
+    assert!(source.contains("hideOfficialUsageAlert"));
     assert!(source.contains("纯 API"));
     assert!(source.contains("apply_pure_api_injection"));
     assert!(commands.contains("commands::apply_pure_api_injection"));
 }
 
 #[test]
-fn manager_ui_disables_plugin_auto_expand_in_compatible_mode() {
+fn manager_ui_omits_plugin_auto_expand() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("core crate should live under crates/codex-plus-core");
     let source = std::fs::read_to_string(repo.join("apps/codex-plus-manager/src/App.tsx")).unwrap();
 
-    assert!(source.contains(
-        "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
-    ));
+    assert!(!source.contains("codexAppPluginAutoExpand"));
+    assert!(!source.contains("插件列表全量展示"));
 }
 
 #[test]
@@ -1155,6 +2688,51 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
 }
 
 #[test]
+fn pick_injectable_codex_page_target_ignores_embedded_browser_page_named_codex() {
+    let targets = vec![
+        target(
+            "browser-pr",
+            "page",
+            "Fix Codex++ menu anchoring · Pull Request",
+            "https://github.com/BigPizzaV3/CodexPlusPlus/pull/1743",
+            Some("ws://browser-pr"),
+        ),
+        target(
+            "main",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://main"),
+        ),
+    ];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("Codex app page should win over embedded browser content");
+
+    assert_eq!(picked.id, "main");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_rejects_embedded_browser_only_page() {
+    let targets = vec![target(
+        "browser-pr",
+        "page",
+        "Fix Codex++ menu anchoring · Pull Request",
+        "https://github.com/BigPizzaV3/CodexPlusPlus/pull/1743",
+        Some("ws://browser-pr"),
+    )];
+
+    let error = pick_injectable_codex_page_target(&targets)
+        .expect_err("embedded browser content must not be selected for injection");
+
+    assert!(
+        error
+            .to_string()
+            .contains("No injectable Codex page target found")
+    );
+}
+
+#[test]
 fn pick_injectable_codex_page_target_accepts_chatgpt_desktop_page() {
     let targets = vec![target(
         "chatgpt",
@@ -1184,6 +2762,157 @@ fn pick_injectable_codex_page_target_accepts_chatgpt_desktop_error_page() {
         .expect("ChatGPT desktop error page should be selected");
 
     assert_eq!(picked.id, "chatgpt-error");
+}
+
+#[test]
+fn avatar_overlay_target_detection_is_narrow() {
+    let overlay = target(
+        "avatar",
+        "page",
+        "ChatGPT Avatar Overlay",
+        "app://-/index.html?initialRoute=%2Favatar-overlay",
+        Some("ws://avatar"),
+    );
+    let main = target(
+        "main",
+        "page",
+        "ChatGPT",
+        "https://chatgpt.com/",
+        Some("ws://main"),
+    );
+
+    assert!(is_avatar_overlay_page_target(&overlay));
+    assert!(!is_primary_codex_page_target(&overlay));
+    assert!(!is_avatar_overlay_page_target(&main));
+    assert!(is_primary_codex_page_target(&main));
+    assert!(!is_avatar_overlay_page_target(&target(
+        "external",
+        "page",
+        "avatar-overlay",
+        "https://example.test/avatar-overlay",
+        Some("ws://external"),
+    )));
+}
+
+#[test]
+fn primary_target_selection_skips_v1_and_v2_overlay_candidates() {
+    let targets = vec![
+        target(
+            "v1-overlay",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Favatar-overlay",
+            Some("ws://v1"),
+        ),
+        target(
+            "v2-overlay",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=/avatar-overlay",
+            Some("ws://v2"),
+        ),
+        target(
+            "main",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://main"),
+        ),
+    ];
+
+    let selected = pick_injectable_codex_page_target(&targets).unwrap();
+
+    assert_eq!(selected.id, "main");
+}
+
+#[test]
+fn quick_chat_target_detection_is_narrow() {
+    for url in [
+        "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat",
+        "app://-/index.html?initialRoute=/chatgpt/quick-chat",
+        "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
+        "app://-/index.html?initialRoute=/chatgpt/quick-chat-prewarm",
+        "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat%2Fconversation-123",
+        "app://-/index.html?initialRoute=/chatgpt/quick-chat/conversation-123",
+    ] {
+        let quick_chat = target("quick-chat", "page", "Codex", url, Some("ws://quick-chat"));
+
+        assert!(is_quick_chat_page_target(&quick_chat));
+        assert!(!is_primary_codex_page_target(&quick_chat));
+    }
+
+    assert!(!is_quick_chat_page_target(&target(
+        "external",
+        "page",
+        "Codex",
+        "https://example.test/chatgpt/quick-chat-prewarm",
+        Some("ws://external"),
+    )));
+    assert!(!is_quick_chat_page_target(&target(
+        "other-param",
+        "page",
+        "Codex",
+        "app://-/index.html?next=initialRoute%3D%252Fchatgpt%252Fquick-chat-prewarm",
+        Some("ws://other-param"),
+    )));
+    assert!(!is_quick_chat_page_target(&target(
+        "similar-route",
+        "page",
+        "Codex",
+        "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chatty",
+        Some("ws://similar-route"),
+    )));
+}
+
+#[test]
+fn primary_target_selection_skips_quick_chat_candidate() {
+    let targets = vec![
+        target(
+            "quick-chat",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat%2Fconversation-123",
+            Some("ws://quick-chat"),
+        ),
+        target(
+            "quick-chat-prewarm",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
+            Some("ws://quick-chat-prewarm"),
+        ),
+        target(
+            "main",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://main"),
+        ),
+    ];
+
+    let selected = pick_injectable_codex_page_target(&targets).unwrap();
+
+    assert_eq!(selected.id, "main");
+}
+
+#[test]
+fn quick_chat_only_target_is_not_injectable_as_codex_main_page() {
+    let targets = vec![target(
+        "quick-chat",
+        "page",
+        "Codex",
+        "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
+        Some("ws://quick-chat"),
+    )];
+
+    let error = pick_injectable_codex_page_target(&targets)
+        .expect_err("Quick Chat helper renderer must not be selected for injection");
+
+    assert!(
+        error
+            .to_string()
+            .contains("No injectable Codex page target found")
+    );
 }
 
 #[test]

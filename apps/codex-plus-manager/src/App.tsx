@@ -198,6 +198,7 @@ export type RelayProfile = {
   protocol: RelayProtocol;
   relayMode: RelayMode;
   officialMixApiKey: boolean;
+  hideOfficialUsageAlert?: boolean;
   testModel: string;
   configContents: string;
   authContents: string;
@@ -208,6 +209,12 @@ export type RelayProfile = {
   autoCompactLimit: string;
   modelList: string;
   modelWindows: string;
+  modelVlm?: string;
+  vlmApiKey?: string;
+  vlmModel?: string;
+  vlmBaseUrl?: string;
+  sub2apiEnabled?: boolean;
+  sub2apiMultiplier?: string;
   userAgent: string;
   aggregate?: RelayAggregateConfig | null;
 };
@@ -691,6 +698,7 @@ const defaultSettings: BackendSettings = {
       protocol: "responses",
       relayMode: "official",
       officialMixApiKey: false,
+      hideOfficialUsageAlert: false,
       testModel: "",
       configContents: "",
       authContents: "",
@@ -701,6 +709,7 @@ const defaultSettings: BackendSettings = {
       autoCompactLimit: "",
       modelList: "",
       modelWindows: "",
+      modelVlm: "",
       userAgent: "",
     },
   ],
@@ -2281,7 +2290,7 @@ function OverviewScreen({
             </div>
             <div className="official-links-overview-side">
               <div className="official-link-actions">
-                <Button onClick={() => void actions.openExternalUrl("https://codex.maynor1024.live/login")}>
+                <Button onClick={() => void actions.openExternalUrl("https://momoai.asia/login")}>
                   <ExternalLink className="h-4 w-4" />
                   {t("国内官网入口（直连）")}
                 </Button>
@@ -3946,7 +3955,7 @@ function RelayProfileEditor({
   };
   const removeModelWindowRow = (index: number) => {
     const nextRows = modelWindowRows.filter((_, rowIndex) => rowIndex !== index);
-    setModelWindowRows(nextRows.length ? nextRows : [{ model: "", window: "" }]);
+    setModelWindowRows(nextRows.length ? nextRows : [{ model: "", window: "", imageHandling: "send-as-is" }]);
   };
   const addModelWindowRows = (rows: ModelWindowRow[]) => {
     setModelWindowRows(mergeModelWindowRows(modelWindowRows, rows));
@@ -4173,7 +4182,7 @@ function RelayProfileEditor({
             </div>
             <div className="relay-model-list-tools">
               <Button
-                onClick={() => setModelWindowRows([...modelWindowRows, { model: "", window: "" }])}
+                onClick={() => setModelWindowRows([...modelWindowRows, { model: "", window: "", imageHandling: "send-as-is" }])}
                 size="sm"
                 type="button"
                 variant="secondary"
@@ -4190,7 +4199,7 @@ function RelayProfileEditor({
                     modelWindows: serializedRows.modelWindows,
                   });
                   if (models?.length) {
-                    addModelWindowRows(models.map((model) => ({ model, window: "" })));
+                    addModelWindowRows(models.map((model) => ({ model, window: "", imageHandling: "send-as-is" })));
                   }
                 }}
                 size="sm"
@@ -6141,6 +6150,9 @@ function buildRelayConfigToml(
     "requires_openai_auth = true",
     `base_url = "${tomlString(baseUrl)}"`,
     options.includeBearerToken && apiKey ? `experimental_bearer_token = "${tomlString(apiKey)}"` : null,
+    "",
+    "[features]",
+    "image_generation = true",
     "",
   ].filter((line): line is string => line !== null).join("\n");
 }

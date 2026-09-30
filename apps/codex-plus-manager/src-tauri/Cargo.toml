@@ -21,7 +21,8 @@ codex-plus-data = { path = "../../../crates/codex-plus-data" }
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "custom-protocol", "tray-icon"] }
+toml_edit.workspace = true
 tauri-plugin-dialog = "2"
 
 [build-dependencies]

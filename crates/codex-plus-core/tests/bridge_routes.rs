@@ -31,9 +31,15 @@ async fn bridge_routes_cover_all_current_paths() {
         ("/user-scripts/reload", json!({})),
         ("/devtools/open", json!({})),
         ("/manager/open", json!({})),
+        ("/manager/open-transient", json!({})),
         ("/backend/status", json!({})),
         ("/codex-model-catalog", json!({})),
         ("/codex-config-model", json!({})),
+        (
+            "/llm-proxy",
+            json!({"url": "http://example.com", "method": "POST"}),
+        ),
+        ("/ads", json!({})),
         ("/zed-remote/status", json!({})),
         (
             "/zed-remote/resolve-host",
@@ -104,6 +110,64 @@ async fn bridge_routes_cover_all_current_paths() {
             "{path} should be routed"
         );
     }
+}
+
+#[tokio::test]
+async fn llm_proxy_rejects_local_addresses() {
+    let ctx = test_context();
+
+    let result = handle_bridge_request(
+        ctx,
+        "/llm-proxy",
+        json!({
+            "url": "https://127.0.0.1/v1/chat/completions",
+            "method": "POST",
+            "headers": {"Authorization": "Bearer sk-test"},
+            "body": "{}"
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], json!("failed"));
+    assert_eq!(result["message"], json!("Base URL 不得指向本机或私有网络"));
+}
+
+#[tokio::test]
+async fn llm_proxy_requires_https() {
+    let ctx = test_context();
+
+    let result = handle_bridge_request(
+        ctx,
+        "/llm-proxy",
+        json!({
+            "url": "http://api.example.com/v1/chat/completions",
+            "method": "POST",
+            "body": "{}"
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], json!("failed"));
+    assert_eq!(result["message"], json!("Base URL 必须使用 HTTPS"));
+}
+
+#[tokio::test]
+async fn llm_proxy_rejects_non_post_methods() {
+    let ctx = test_context();
+
+    let result = handle_bridge_request(
+        ctx,
+        "/llm-proxy",
+        json!({
+            "url": "https://api.example.com/v1/chat/completions",
+            "method": "GET",
+            "body": "{}"
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], json!("failed"));
+    assert_eq!(result["message"], json!("LLM Bridge 仅支持 POST 请求"));
 }
 
 #[tokio::test]
@@ -314,7 +378,7 @@ async fn settings_routes_use_settings_service() {
     let updated = handle_bridge_request(
         ctx.clone(),
         "/settings/set",
-        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppServiceTierControls": true}),
+        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppServiceTierControls": true, "codexAppPetRealMouseLook": true}),
     )
     .await;
     let loaded = handle_bridge_request(ctx, "/settings/get", json!({})).await;
@@ -322,6 +386,7 @@ async fn settings_routes_use_settings_service() {
     assert_eq!(updated["providerSyncEnabled"], true);
     assert_eq!(updated["codexAppSessionDelete"], false);
     assert_eq!(updated["codexAppServiceTierControls"], true);
+    assert_eq!(updated["codexAppPetRealMouseLook"], true);
     assert_eq!(loaded, updated);
 }
 
@@ -353,7 +418,7 @@ async fn runtime_routes_keep_user_script_inventory_shape() {
 }
 
 #[tokio::test]
-async fn runtime_status_and_devtools_routes_are_dispatched() {
+async fn runtime_status_devtools_repair_and_ads_routes_are_dispatched() {
     let ctx = test_context();
 
     assert_eq!(
@@ -365,8 +430,16 @@ async fn runtime_status_and_devtools_routes_are_dispatched() {
         json!({"status": "ok", "opened": "manager"})
     );
     assert_eq!(
+        handle_bridge_request(ctx.clone(), "/manager/open-transient", json!({})).await,
+        json!({"status": "ok", "opened": "manager-transient"})
+    );
+    assert_eq!(
         handle_bridge_request(ctx.clone(), "/backend/status", json!({})).await,
-        json!({"status": "ok", "message": "后端已连接", "version": codex_plus_core::version::VERSION})
+        json!({"status": "ok", "message": "后端已连接", "version": codex_plus_core::version::VERSION, "hideOfficialUsageAlert": false})
+    );
+    assert_eq!(
+        handle_bridge_request(ctx.clone(), "/ads", json!({})).await,
+        json!({"version": 1, "ads": [{"id": "runtime-ad"}]})
     );
     assert_eq!(
         handle_bridge_request(ctx.clone(), "/zed-remote/status", json!({})).await,
@@ -441,6 +514,29 @@ async fn runtime_status_and_devtools_routes_are_dispatched() {
         .await,
         json!({"status": "ok", "removed": 1})
     );
+}
+
+#[tokio::test]
+async fn backend_status_includes_active_official_usage_alert_setting() {
+    let settings = BackendSettings {
+        active_relay_id: "official".to_string(),
+        relay_profiles: vec![codex_plus_core::settings::RelayProfile {
+            id: "official".to_string(),
+            relay_mode: codex_plus_core::settings::RelayMode::Official,
+            hide_official_usage_alert: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let ctx = BridgeContext::new(
+        Arc::new(FakeSettings::with_settings(settings)),
+        Arc::new(FakeRuntime::default()),
+        Arc::new(FakeData::default()),
+    );
+
+    let result = handle_bridge_request(ctx, "/backend/status", json!({})).await;
+
+    assert_eq!(result["hideOfficialUsageAlert"], true);
 }
 
 #[tokio::test]
@@ -620,6 +716,41 @@ async fn user_script_manager_scans_and_persists_inventory_shape() {
 }
 
 #[tokio::test]
+async fn user_script_inventory_merges_renderer_runtime_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let builtin_dir = temp.path().join("builtin");
+    let user_dir = temp.path().join("user");
+    std::fs::create_dir_all(&builtin_dir).unwrap();
+    std::fs::create_dir_all(&user_dir).unwrap();
+    std::fs::write(user_dir.join("loaded.js"), "window.loaded = true;").unwrap();
+    std::fs::write(user_dir.join("failed.js"), "throw new Error('boom');").unwrap();
+    let manager =
+        UserScriptManager::new(builtin_dir, user_dir, temp.path().join("user_scripts.json"));
+    let runtime_status = json!({
+        "user:loaded.js": {"status": "loaded", "error": ""},
+        "user:failed.js": {"status": "failed", "error": "boom"}
+    });
+
+    let inventory = manager
+        .inventory_with_runtime_status(Some(&runtime_status))
+        .unwrap();
+    let scripts = inventory["scripts"].as_array().unwrap();
+    let loaded = scripts
+        .iter()
+        .find(|script| script["key"] == "user:loaded.js")
+        .unwrap();
+    let failed = scripts
+        .iter()
+        .find(|script| script["key"] == "user:failed.js")
+        .unwrap();
+
+    assert_eq!(loaded["status"], "loaded");
+    assert_eq!(loaded["error"], "");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["error"], "boom");
+}
+
+#[tokio::test]
 async fn user_script_manager_deletes_market_script_metadata_and_rejects_builtin_delete() {
     let temp = tempfile::tempdir().unwrap();
     let builtin_dir = temp.path().join("builtin");
@@ -706,7 +837,7 @@ async fn core_runtime_reload_evaluates_enabled_user_bundle_and_status_is_ok() {
 
     assert_eq!(
         status,
-        json!({"status": "ok", "message": "后端已连接", "version": codex_plus_core::version::VERSION})
+        json!({"status": "ok", "message": "后端已连接", "version": codex_plus_core::version::VERSION, "hideOfficialUsageAlert": false})
     );
     assert_eq!(reloaded["scripts"][0]["key"], "builtin:demo.js");
     let evaluated = evaluated.lock().unwrap();
@@ -1032,6 +1163,7 @@ impl BridgeSettingsService for FakeSettings {
             "codexAppUpstreamWorktreeCreate",
             "codexAppNativeMenuPlacement",
             "codexAppServiceTierControls",
+            "codexAppPetRealMouseLook",
         ] {
             if let Some(value) = payload.get(key).and_then(Value::as_bool) {
                 raw.insert(key.to_string(), json!(value));
@@ -1105,6 +1237,10 @@ impl BridgeRuntimeService for FakeRuntime {
         Ok(json!({"status": "ok", "opened": "manager"}))
     }
 
+    async fn open_transient_manager(&self) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "opened": "manager-transient"}))
+    }
+
     async fn backend_status(&self) -> anyhow::Result<Value> {
         Ok(
             json!({"status": "ok", "message": "后端已连接", "version": codex_plus_core::version::VERSION}),
@@ -1121,6 +1257,10 @@ impl BridgeRuntimeService for FakeRuntime {
             "models": ["qwen3-coder"],
             "sources": []
         }))
+    }
+
+    async fn ads(&self) -> anyhow::Result<Value> {
+        Ok(json!({"version": 1, "ads": [{"id": "runtime-ad"}]}))
     }
 
     async fn zed_remote_status(&self) -> anyhow::Result<Value> {
@@ -1375,6 +1515,10 @@ impl LaunchHooks for ContextHooks {
         Ok(())
     }
 
+    async fn run_remote_control_session_recovery(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn start_helper(&self, _helper_port: u16) -> anyhow::Result<()> {
         Ok(())
     }
@@ -1425,7 +1569,11 @@ impl LaunchHooks for ContextHooks {
         self.event(format!("status:{status}"));
     }
 
-    async fn wait_for_codex_exit(&self, _launch: &CodexLaunch) -> anyhow::Result<()> {
+    async fn wait_for_codex_exit(
+        &self,
+        _launch: &CodexLaunch,
+        _debug_port: u16,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 

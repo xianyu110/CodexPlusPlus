@@ -12,6 +12,9 @@ pub struct ModelCatalogEntry {
     pub display_name: String,
     /// 来自后缀的窗口值；None 表示该条目无后缀（回落顶层默认）。
     pub suffix_window: Option<u64>,
+    /// 显式自动压缩百分比，以百万分之一百分比为单位（90% = 90_000_000）。
+    /// None 表示不覆盖 Codex 默认的自动压缩行为。
+    pub auto_compact_percent: Option<u32>,
 }
 
 /// 解析单个模型条目的后缀，返回 (slug, 可选窗口)。
@@ -54,7 +57,7 @@ pub fn migrate_model_list_with_suffixes(model_list: &str) -> (String, HashMap<St
 }
 
 /// 解析括号内的窗口 token，如 "1M" / "200K" / "1000000"。非法或 0 返回 None。
-fn parse_window_token(token: &str) -> Option<u64> {
+pub(crate) fn parse_window_token(token: &str) -> Option<u64> {
     let token = token.trim();
     if token.is_empty() {
         return None;
@@ -69,8 +72,36 @@ fn parse_window_token(token: &str) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
-        .map(|value| value * multiplier)
+        .and_then(|value| value.checked_mul(multiplier))
         .filter(|value| *value > 0)
+}
+
+/// 解析自动压缩百分比 token，如 "90"、"84.329412%"。
+/// 返回百万分之一百分比，供 Rust 与前端使用同一套精度和舍入规则。
+pub(crate) fn parse_compact_percent(token: &str) -> Option<u32> {
+    let token = token.trim();
+    let token = token.strip_suffix('%').unwrap_or(token).trim();
+    if token.ends_with('%') {
+        return None;
+    }
+    let (whole, fraction) = token.split_once('.').unwrap_or((token, ""));
+    if fraction.len() > 6 || whole.is_empty() || !whole.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.is_empty() && !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let whole = whole.parse::<u32>().ok()?;
+    let mut fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u32>().ok()?
+    };
+    for _ in fraction.len()..6 {
+        fraction_value = fraction_value.checked_mul(10)?;
+    }
+    let scaled = whole.checked_mul(1_000_000)?.checked_add(fraction_value)?;
+    (scaled > 0 && scaled <= 100_000_000).then_some(scaled)
 }
 
 /// 收集 profile 的全部模型条目（当前 model + model_list），去重并从 `model_windows` map 读取窗口。
@@ -82,6 +113,7 @@ fn parse_window_token(token: &str) -> Option<u64> {
 pub fn collect_catalog_entries(
     model_list: &str,
     model_windows: &HashMap<String, String>,
+    model_auto_compact: &HashMap<String, String>,
     current_model: &str,
 ) -> Vec<ModelCatalogEntry> {
     // 先解析 model_list，保留顺序并去重；后缀已从 model_list 剥离，窗口来自 model_windows map。
@@ -102,10 +134,14 @@ pub fn collect_catalog_entries(
         let suffix_window = model_windows
             .get(&slug)
             .and_then(|token| parse_window_token(token));
+        let auto_compact_percent = model_auto_compact
+            .get(&slug)
+            .and_then(|token| parse_compact_percent(token));
         list_entries.push(ModelCatalogEntry {
             display_name: slug.clone(),
             slug,
             suffix_window,
+            auto_compact_percent,
         });
     }
 
@@ -118,10 +154,14 @@ pub fn collect_catalog_entries(
             let suffix_window = model_windows
                 .get(&slug)
                 .and_then(|token| parse_window_token(token));
+            let auto_compact_percent = model_auto_compact
+                .get(&slug)
+                .and_then(|token| parse_compact_percent(token));
             entries.push(ModelCatalogEntry {
                 display_name: slug.clone(),
                 slug: slug.clone(),
                 suffix_window,
+                auto_compact_percent,
             });
             // 从 list_entries 中移除同 slug 条目，避免重复。
             list_entries.retain(|entry| entry.slug != slug);
@@ -139,18 +179,153 @@ const BUNDLED_TEMPLATE_JSON: &str = include_str!(concat!(
     "/../../assets/codex-models.json"
 ));
 
+const GPT56_METADATA_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/gpt56-model-metadata-compat.json"
+));
+
+const DEEPSEEK_METADATA_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/deepseek-model-metadata.json"
+));
+
+const ASTRA_METADATA_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/astra-model-metadata-compat.json"
+));
+
+const GPT6_SOL_LUNA_METADATA_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/gpt6-sol-luna-model-metadata-compat.json"
+));
+/// 统一的精调/供应商元数据（assets/*-model-metadata*.json）：slug 命中即把
+/// 条目字段覆盖到模板基座上。历史 compat（gpt-5.6 / astra 产品级精调，如
+/// fast tier）排在供应商事实之前；各文件 slug 两两不相交，顺序仅表达优先级。
+/// deepseek 文件在官方 DeepSeek Responses 场景由 deepseek_model_template_entry
+/// 优先处理，放这里覆盖经中转使用 deepseek 模型的场景。
+const VENDOR_METADATA_JSONS: &[&str] = &[
+    GPT56_METADATA_JSON,
+    ASTRA_METADATA_JSON,
+    DEEPSEEK_METADATA_JSON,
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/doubao-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/gemini-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/glm-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/grok-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/kimi-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/mimo-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/minimax-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/mistral-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/muse-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/nvidia-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/qwen-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/stepfun-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/thinkingmachines-model-metadata.json"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/gptoss-model-metadata.json"
+    )),
+];
+
+pub fn requires_bundled_metadata_catalog(slug: &str) -> bool {
+    compatibility_metadata_entry(slug).is_some()
+}
+
+pub fn model_ui_metadata(slug: &str) -> Option<Value> {
+    let metadata = compatibility_metadata_entry(slug)?;
+    let levels = metadata
+        .get("supported_reasoning_levels")?
+        .as_array()?
+        .iter()
+        .filter_map(|level| {
+            let effort = level.get("effort")?.as_str()?.trim();
+            if effort.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "reasoningEffort": effort,
+                "description": level
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            }))
+        })
+        .collect::<Vec<_>>();
+    Some(json!({
+        "displayName": metadata
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(slug),
+        "description": metadata
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("Custom model"),
+        "defaultReasoningEffort": metadata
+            .get("default_reasoning_level")
+            .and_then(Value::as_str)
+            .unwrap_or("medium"),
+        "supportedReasoningEfforts": levels,
+        "additionalSpeedTiers": metadata
+            .get("additional_speed_tiers")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "serviceTiers": metadata
+            .get("service_tiers")
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+    }))
+}
+
 /// 构建 codex model_catalog_json 内容。
 ///
 /// 采用 cc-switch 的 template-clone 思路：取 codex 自带 bundled entry 做模板，
 /// 再覆盖 slug / display_name / description / context_window / max_context_window /
 /// effective_context_window_percent / priority / auto_compact_token_limit 等字段。
 /// 无后缀条目用 fallback_window；fallback 也无时回落 272000（codex 默认）。
-/// auto_compact_token_limit 留 null：codex 内置模型即 null（按比例算，调研第六节）。
+/// auto_compact_token_limit 仅在条目带显式百分比时写入；否则留 null，保持 Codex 默认行为。
 pub fn build_model_catalog_json(
     entries: &[ModelCatalogEntry],
     fallback_window: Option<u64>,
 ) -> String {
-    build_model_catalog_json_with_template(entries, fallback_window, None)
+    build_model_catalog_json_with_capabilities(entries, fallback_window, None, None, false)
 }
 
 /// 使用指定模板（或内置 bundled 模板）构建 catalog。
@@ -160,30 +335,83 @@ pub fn build_model_catalog_json_with_template(
     fallback_window: Option<u64>,
     template: Option<&Value>,
 ) -> String {
-    let template = template
-        .cloned()
-        .or_else(|| load_bundled_template_entry())
-        .unwrap_or_else(|| json!({}));
+    build_model_catalog_json_with_capabilities(entries, fallback_window, template, None, false)
+}
 
+/// 使用显式 provider capability 构建 catalog。
+/// `use_responses_lite_override` 仅由明确知道 provider wire capability 的调用方传入；
+/// 通用 builder 默认保留模板中的原始 Lite 行为。
+pub(crate) fn build_model_catalog_json_with_capabilities(
+    entries: &[ModelCatalogEntry],
+    fallback_window: Option<u64>,
+    template: Option<&Value>,
+    use_responses_lite_override: Option<bool>,
+    deepseek_metadata: bool,
+) -> String {
     let models: Vec<Value> = entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let context_window = entry.suffix_window.or(fallback_window).unwrap_or(272_000);
-            let mut model = template.clone();
+            let (mut model, has_model_metadata) = if deepseek_metadata {
+                deepseek_model_template_entry(&entry.slug)
+                    .unwrap_or_else(|| model_template_entry(&entry.slug))
+            } else {
+                template
+                    .cloned()
+                    .map(|template| (template, false))
+                    .unwrap_or_else(|| model_template_entry(&entry.slug))
+            };
+            let metadata_window = model.get("context_window").and_then(Value::as_u64);
+            let metadata_max_window = model.get("max_context_window").and_then(Value::as_u64);
+            let context_window = entry
+                .suffix_window
+                .or(fallback_window)
+                .or(metadata_window)
+                .unwrap_or(272_000);
+            // 用户显式配置窗口（后缀 / 每模型窗口 / profile 全局）时两字段同值；
+            // 未显式配置时保留官方模板的 max_context_window 上限——gpt-5.6 / gpt-6
+            // 官方为 272000/872000，压平成同值会把 codex 侧 872K 能力上限写低（#2191）。
+            let max_context_window = entry
+                .suffix_window
+                .or(fallback_window)
+                .map(|window| window)
+                .unwrap_or_else(|| metadata_max_window.unwrap_or(context_window));
             model["slug"] = json!(entry.slug);
-            model["display_name"] = json!(entry.display_name);
-            model["description"] = json!(entry.display_name);
+            if !has_model_metadata {
+                model["display_name"] = json!(entry.display_name);
+                model["description"] = json!(entry.display_name);
+            }
             model["context_window"] = json!(context_window);
-            model["max_context_window"] = json!(context_window);
-            // 默认 95 会让 1M 显示为 950K，显式写 100 以显示真实窗口。
-            model["effective_context_window_percent"] = json!(100);
-            model["auto_compact_token_limit"] = Value::Null;
+            model["max_context_window"] = json!(max_context_window);
+            // 通用自定义模型显示完整窗口；DeepSeek Responses 保留官方目录的 95%。
+            if !deepseek_metadata {
+                model["effective_context_window_percent"] = json!(100);
+            }
+            if let Some(compact_percent) = entry.auto_compact_percent {
+                let compact_limit = ((context_window as u128 * compact_percent as u128
+                    + 50_000_000)
+                    / 100_000_000) as u64;
+                model["auto_compact_token_limit"] = json!(compact_limit.max(1));
+            } else {
+                model["auto_compact_token_limit"] = Value::Null;
+            }
             model["priority"] = json!(1000 + index);
             model["visibility"] = json!("list");
-            model["supported_in_api"] = json!(true);
-            model["additional_speed_tiers"] = json!([]);
-            model["service_tiers"] = json!([]);
+            // Custom Responses relay catalogs must advertise the v2 multi-agent
+            // contract so Codex exposes the sub-agent tools.
+            if use_responses_lite_override.is_some() {
+                model["multi_agent_version"] = json!("v2");
+            }
+            if !deepseek_metadata {
+                model["supported_in_api"] = json!(true);
+            }
+            if let Some(use_responses_lite) = use_responses_lite_override {
+                model["use_responses_lite"] = json!(use_responses_lite);
+            }
+            if !has_model_metadata {
+                model["additional_speed_tiers"] = json!([]);
+                model["service_tiers"] = json!([]);
+            }
             model["availability_nux"] = Value::Null;
             model["upgrade"] = Value::Null;
             model
@@ -192,8 +420,105 @@ pub fn build_model_catalog_json_with_template(
     serde_json::to_string_pretty(&json!({ "models": models })).unwrap_or_default()
 }
 
-/// 加载内置 bundled catalog 模板的第一条 model entry。
-fn load_bundled_template_entry() -> Option<Value> {
+fn deepseek_model_template_entry(slug: &str) -> Option<(Value, bool)> {
+    let compatibility = catalog_metadata_entry(DEEPSEEK_METADATA_JSON, slug)?;
+    let mut template = first_bundled_template_entry().unwrap_or_else(|| json!({}));
+    if let (Some(target), Some(source)) = (template.as_object_mut(), compatibility.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    Some((template, true))
+}
+
+fn model_template_entry(slug: &str) -> (Value, bool) {
+    let (template, has_model_metadata) = runtime_or_bundled_template_entry(slug);
+    if let Some(template) = template {
+        return (template, has_model_metadata);
+    }
+    (
+        first_bundled_template_entry().unwrap_or_else(|| json!({})),
+        false,
+    )
+}
+
+/// 运行时模板查找链（issue #2141）：
+/// 1. 精调/供应商元数据层（gpt-5.6/astra 产品级精调 + 供应商事实，字段覆盖
+///    优先级最高；基座优先取运行时官方缓存，官方热更新流入未被精调覆盖的字段）
+/// 2. 用户本机 codex 官方 models_cache.json（随官方 App 更新，元数据最新鲜）
+/// 3. 打包的静态资产 assets/codex-models.json（兜底，纯 API / 未登录用户）
+///
+/// 兜底场景（slug 未命中任何同 slug 条目）仍用静态资产首条做模板基座，
+/// 保证未匹配模型在所有机器上的行为一致、可测试。
+fn runtime_or_bundled_template_entry(slug: &str) -> (Option<Value>, bool) {
+    if let Some(entry) = compatibility_metadata_entry(slug) {
+        // 基座优先取运行时官方缓存（随官方 App 热更新、字段最新鲜），精调字段
+        // 覆盖其上：官方更新能流入未被精调覆盖的字段，产品特性与供应商事实
+        // 不被官方数据冲掉。无缓存（纯 API / 未登录 / 测试隔离）回落静态资产。
+        let base = runtime_models_cache_entry(slug)
+            .or_else(|| bundled_template_entry(slug))
+            .unwrap_or_else(|| first_bundled_template_entry().unwrap_or_else(|| json!({})));
+        let mut template = base;
+        if let (Some(target), Some(source)) = (template.as_object_mut(), entry.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        return (Some(template), true);
+    }
+    if let Some(entry) = runtime_models_cache_entry(slug) {
+        return (Some(entry), true);
+    }
+    if let Some(entry) = bundled_template_entry(slug) {
+        return (Some(entry), true);
+    }
+    (None, false)
+}
+
+/// 从用户本机 codex 官方缓存读取同 slug 条目。
+/// 缓存由官方 App 登录态维护，这里只读不写；文件缺失或解析失败时静默回落静态资产。
+fn runtime_models_cache_entry(slug: &str) -> Option<Value> {
+    let cache_path = crate::codex_home::default_codex_home_dir().join("models_cache.json");
+    let contents = std::fs::read_to_string(cache_path).ok()?;
+    let catalog: Value = serde_json::from_str(&contents).ok()?;
+    find_catalog_entry(catalog.get("models")?.as_array()?, slug).cloned()
+}
+
+/// 按 slug 查找 catalog 条目：先精确匹配，未命中再按大小写不敏感匹配。
+/// 供应商 Model Key 大小写不统一（如智谱 GLM-5.3-FlashX），上游 API 对大小写
+/// 宽容，本地只做精确匹配会漏配元数据。
+fn find_catalog_entry<'a>(models: &'a [Value], slug: &str) -> Option<&'a Value> {
+    models
+        .iter()
+        .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug))
+        .or_else(|| {
+            models.iter().find(|entry| {
+                entry
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(slug))
+            })
+        })
+}
+
+fn bundled_template_entry(slug: &str) -> Option<Value> {
+    let catalog: Value = serde_json::from_str(BUNDLED_TEMPLATE_JSON).ok()?;
+    find_catalog_entry(catalog.get("models")?.as_array()?, slug).cloned()
+}
+
+fn first_bundled_template_entry() -> Option<Value> {
     let catalog: Value = serde_json::from_str(BUNDLED_TEMPLATE_JSON).ok()?;
     catalog.get("models")?.as_array()?.first().cloned()
+}
+
+fn compatibility_metadata_entry(slug: &str) -> Option<Value> {
+    VENDOR_METADATA_JSONS
+        .iter()
+        .find_map(|catalog_json| catalog_metadata_entry(catalog_json, slug))
+        .or_else(|| catalog_metadata_entry(GPT6_SOL_LUNA_METADATA_JSON, slug))
+}
+
+fn catalog_metadata_entry(catalog_json: &str, slug: &str) -> Option<Value> {
+    let catalog: Value = serde_json::from_str(catalog_json).ok()?;
+    find_catalog_entry(catalog.get("models")?.as_array()?, slug).cloned()
 }
